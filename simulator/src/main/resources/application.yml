@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: r4-simulator
+
+  main:
+    web-application-type: none
+
+r4:
+  hub-url: ${R4_HUB_URL:http://localhost:8080}
+  initial-delay-ms: 1000
+  heartbeat-interval-ms: 10000
