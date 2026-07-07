@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: r4-hub
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - health
+          - info
