@@ -9,3 +9,7 @@ management:
         include:
           - health
           - info
+
+r4:
+  devices:
+    offline-after-ms: 25000
