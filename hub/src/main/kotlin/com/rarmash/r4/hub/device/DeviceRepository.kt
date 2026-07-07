@@ -9,5 +9,7 @@ interface DeviceRepository {
 
     fun findById(deviceId: UUID): Device?
 
+    fun findByAgentId(agentId: UUID): Device?
+
     fun findAll(): List<Device>
 }

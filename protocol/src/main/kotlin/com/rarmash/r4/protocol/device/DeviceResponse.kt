@@ -5,6 +5,7 @@ import java.util.UUID
 
 data class DeviceResponse(
     val id: UUID,
+    val agentId: UUID,
     val name: String,
     val platform: String,
     val agentVersion: String,

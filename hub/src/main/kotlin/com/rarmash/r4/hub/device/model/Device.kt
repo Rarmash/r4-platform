@@ -6,6 +6,7 @@ import java.util.UUID
 
 data class Device(
     val id: UUID,
+    val agentId: UUID,
     val name: String,
     val platform: String,
     val agentVersion: String,

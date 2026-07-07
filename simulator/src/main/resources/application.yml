@@ -7,5 +7,6 @@ spring:
 
 r4:
   hub-url: ${R4_HUB_URL:http://localhost:8080}
+  identity-file: ${R4_IDENTITY_FILE:${user.home}/.r4/simulator-id}
   initial-delay-ms: 1000
   heartbeat-interval-ms: 10000

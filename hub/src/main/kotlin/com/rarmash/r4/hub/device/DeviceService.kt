@@ -19,17 +19,30 @@ class DeviceService(
 
     fun register(request: RegisterDeviceRequest): DeviceResponse {
         val now = Instant.now(clock)
+        val existingDevice = deviceRepository.findByAgentId(request.agentId)
 
-        val device = Device(
-            id = UUID.randomUUID(),
-            name = request.name.trim(),
-            platform = request.platform.trim(),
-            agentVersion = request.agentVersion.trim(),
-            capabilities = request.capabilities,
-            status = DeviceStatus.ONLINE,
-            registeredAt = now,
-            lastSeenAt = now
-        )
+        val device = if (existingDevice == null) {
+            Device(
+                id = UUID.randomUUID(),
+                agentId = request.agentId,
+                name = request.name.trim(),
+                platform = request.platform.trim(),
+                agentVersion = request.agentVersion.trim(),
+                capabilities = request.capabilities,
+                status = DeviceStatus.ONLINE,
+                registeredAt = now,
+                lastSeenAt = now
+            )
+        } else {
+            existingDevice.copy(
+                name = request.name.trim(),
+                platform = request.platform.trim(),
+                agentVersion = request.agentVersion.trim(),
+                capabilities = request.capabilities,
+                status = DeviceStatus.ONLINE,
+                lastSeenAt = now
+            )
+        }
 
         return deviceRepository.save(device).toResponse()
     }
@@ -57,6 +70,7 @@ class DeviceService(
     private fun Device.toResponse(): DeviceResponse {
         return DeviceResponse(
             id = id,
+            agentId = agentId,
             name = name,
             platform = platform,
             agentVersion = agentVersion,

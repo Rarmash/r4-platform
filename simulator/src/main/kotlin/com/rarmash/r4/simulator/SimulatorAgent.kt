@@ -12,7 +12,8 @@ import java.util.UUID
 
 @Component
 class SimulatorAgent(
-    private val hubRestClient: RestClient
+    private val hubRestClient: RestClient,
+    private val identityProvider: AgentIdentityProvider
 ) {
 
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -31,9 +32,13 @@ class SimulatorAgent(
     }
 
     private fun register(): UUID? {
-        logger.info("Registering simulator in R4 Hub")
+        logger.info(
+            "Registering simulator in R4 Hub with agent ID {}",
+            identityProvider.agentId
+        )
 
         val request = RegisterDeviceRequest(
+            agentId = identityProvider.agentId,
             name = "Local simulator",
             platform = "windows-amd64",
             agentVersion = "0.1.0",

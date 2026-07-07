@@ -19,6 +19,10 @@ class InMemoryDeviceRepository : DeviceRepository {
         return devices[deviceId]
     }
 
+    override fun findByAgentId(agentId: UUID): Device? {
+        return devices.values.firstOrNull { it.agentId == agentId }
+    }
+
     override fun findAll(): List<Device> {
         return devices.values
             .sortedBy { it.registeredAt }
