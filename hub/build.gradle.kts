@@ -28,6 +28,8 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation(kotlin("test"))
 
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation(kotlin("test"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
