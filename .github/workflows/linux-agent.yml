@@ -106,9 +106,13 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
-            || gh release create "${GITHUB_REF_NAME}" --generate-notes
+            || gh release create "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+
           gh release upload "${GITHUB_REF_NAME}" \
             release/r4-agent-linux.tar.gz \
             release/r4-agent-linux.tar.gz.sha256 \
