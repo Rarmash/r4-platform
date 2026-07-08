@@ -2,6 +2,17 @@ spring:
   application:
     name: r4-hub
 
+  datasource:
+    url: ${R4_DB_URL:jdbc:postgresql://localhost:5432/r4}
+    username: ${R4_DB_USERNAME:r4}
+    password: ${R4_DB_PASSWORD:r4}
+    hikari:
+      minimum-idle: 1
+      maximum-pool-size: ${R4_DB_POOL_SIZE:5}
+
+  liquibase:
+    change-log: classpath:/db/changelog/db.changelog-master.yaml
+
 management:
   endpoints:
     web:

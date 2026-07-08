@@ -1,11 +1,9 @@
 package com.rarmash.r4.hub.command
 
 import com.rarmash.r4.hub.command.model.Command
-import org.springframework.stereotype.Repository
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-@Repository
 class InMemoryCommandRepository : CommandRepository {
 
     private val commands = ConcurrentHashMap<UUID, Command>()

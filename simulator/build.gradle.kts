@@ -30,3 +30,11 @@ dependencies {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+tasks.bootJar {
+    archiveFileName.set("r4-simulator.jar")
+}
+
+tasks.jar {
+    enabled = false
+}

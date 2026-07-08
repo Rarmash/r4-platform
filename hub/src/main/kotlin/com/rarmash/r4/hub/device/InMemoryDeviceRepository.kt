@@ -1,11 +1,9 @@
 package com.rarmash.r4.hub.device
 
 import com.rarmash.r4.hub.device.model.Device
-import org.springframework.stereotype.Repository
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-@Repository
 class InMemoryDeviceRepository : DeviceRepository {
 
     private val devices = ConcurrentHashMap<UUID, Device>()
