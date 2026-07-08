@@ -32,6 +32,9 @@ class JdbcCommandRepository(
                 status,
                 result,
                 error,
+                attempt_count,
+                lease_expires_at,
+                lease_token,
                 created_at,
                 started_at,
                 completed_at
@@ -44,6 +47,9 @@ class JdbcCommandRepository(
                 :status,
                 :result,
                 :error,
+                :attemptCount,
+                :leaseExpiresAt,
+                :leaseToken,
                 :createdAt,
                 :startedAt,
                 :completedAt
@@ -55,6 +61,9 @@ class JdbcCommandRepository(
                 status = EXCLUDED.status,
                 result = EXCLUDED.result,
                 error = EXCLUDED.error,
+                attempt_count = EXCLUDED.attempt_count,
+                lease_expires_at = EXCLUDED.lease_expires_at,
+                lease_token = EXCLUDED.lease_token,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at
             """.trimIndent()
@@ -69,6 +78,13 @@ class JdbcCommandRepository(
             .param("status", command.status.name)
             .param("result", command.result)
             .param("error", command.error)
+            .param("attemptCount", command.attemptCount)
+            .param(
+                "leaseExpiresAt",
+                command.leaseExpiresAt
+                    ?.atOffset(ZoneOffset.UTC)
+            )
+            .param("leaseToken", command.leaseToken)
             .param(
                 "createdAt",
                 command.createdAt.atOffset(ZoneOffset.UTC)
@@ -116,6 +132,99 @@ class JdbcCommandRepository(
             .list()
     }
 
+    override fun claimNext(
+        deviceId: UUID,
+        now: java.time.Instant,
+        leaseExpiresAt: java.time.Instant,
+        leaseToken: UUID
+    ): Command? {
+        return jdbcClient.sql(
+            """
+            WITH candidate AS (
+                SELECT id
+                FROM device_commands
+                WHERE device_id = :deviceId
+                  AND (
+                      status = 'PENDING'
+                      OR (
+                          status = 'RUNNING'
+                          AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at <= :now
+                      )
+                  )
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE device_commands AS command
+            SET
+                status = 'RUNNING',
+                result = NULL,
+                error = NULL,
+                attempt_count = command.attempt_count + 1,
+                lease_expires_at = :leaseExpiresAt,
+                lease_token = :leaseToken,
+                started_at = :now,
+                completed_at = NULL
+            FROM candidate
+            WHERE command.id = candidate.id
+            RETURNING command.*
+            """.trimIndent()
+        )
+            .param("deviceId", deviceId)
+            .param("now", now.atOffset(ZoneOffset.UTC))
+            .param(
+                "leaseExpiresAt",
+                leaseExpiresAt.atOffset(ZoneOffset.UTC)
+            )
+            .param("leaseToken", leaseToken)
+            .query(rowMapper)
+            .optional()
+            .orElse(null)
+    }
+
+    override fun complete(
+        commandId: UUID,
+        deviceId: UUID,
+        leaseToken: UUID,
+        completedAt: java.time.Instant,
+        status: CommandStatus,
+        result: String?,
+        error: String?
+    ): Command? {
+        return jdbcClient.sql(
+            """
+            UPDATE device_commands
+            SET
+                status = :status,
+                result = :result,
+                error = :error,
+                completed_at = :completedAt,
+                lease_expires_at = NULL,
+                lease_token = NULL
+            WHERE id = :commandId
+              AND device_id = :deviceId
+              AND status = 'RUNNING'
+              AND lease_token = :leaseToken
+              AND lease_expires_at > :completedAt
+            RETURNING *
+            """.trimIndent()
+        )
+            .param("status", status.name)
+            .param("result", result)
+            .param("error", error)
+            .param(
+                "completedAt",
+                completedAt.atOffset(ZoneOffset.UTC)
+            )
+            .param("commandId", commandId)
+            .param("deviceId", deviceId)
+            .param("leaseToken", leaseToken)
+            .query(rowMapper)
+            .optional()
+            .orElse(null)
+    }
+
     private fun mapCommand(resultSet: ResultSet): Command {
         return Command(
             id = resultSet.getObject(
@@ -135,6 +244,15 @@ class JdbcCommandRepository(
             ),
             result = resultSet.getString("result"),
             error = resultSet.getString("error"),
+            attemptCount = resultSet.getInt("attempt_count"),
+            leaseExpiresAt = resultSet.getObject(
+                "lease_expires_at",
+                OffsetDateTime::class.java
+            )?.toInstant(),
+            leaseToken = resultSet.getObject(
+                "lease_token",
+                UUID::class.java
+            ),
             createdAt = resultSet.getObject(
                 "created_at",
                 OffsetDateTime::class.java

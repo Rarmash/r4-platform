@@ -44,6 +44,7 @@ class CommandServiceTest {
         commandService = CommandService(
             commandRepository = commandRepository,
             deviceRepository = deviceRepository,
+            leaseDurationMs = 30_000,
             clock = clock
         )
     }
@@ -124,8 +125,9 @@ class CommandServiceTest {
 
         val completed = commandService.complete(
             deviceId = device.id,
-            commandId = created.id,
+            commandId = claimed.id,
             request = CompleteCommandRequest(
+                leaseToken = requireNotNull(claimed.leaseToken),
                 success = true,
                 result = "Hello"
             )
@@ -150,21 +152,26 @@ class CommandServiceTest {
     fun `completed command cannot be completed again`() {
         val device = registerDevice()
 
-        val created = commandService.create(
+        commandService.create(
             deviceId = device.id,
             request = CreateCommandRequest(
                 type = "command.echo"
             )
         )
 
-        commandService.claimNext(device.id)
+        val claimed = requireNotNull(
+            commandService.claimNext(device.id)
+        )
+
+        val leaseToken = requireNotNull(claimed.leaseToken)
 
         commandService.complete(
             deviceId = device.id,
-            commandId = created.id,
+            commandId = claimed.id,
             request = CompleteCommandRequest(
+                leaseToken = leaseToken,
                 success = true,
-                result = "Done"
+                result = "Hello"
             )
         )
 
@@ -173,16 +180,20 @@ class CommandServiceTest {
         ) {
             commandService.complete(
                 deviceId = device.id,
-                commandId = created.id,
+                commandId = claimed.id,
                 request = CompleteCommandRequest(
+                    leaseToken = leaseToken,
                     success = true,
-                    result = "Done again"
+                    result = "Hello again"
                 )
             )
         }
 
         assertThat(exception.statusCode)
             .isEqualTo(HttpStatus.CONFLICT)
+
+        assertThat(exception.reason)
+            .contains("is not running")
     }
 
     @Test
@@ -207,5 +218,99 @@ class CommandServiceTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun `expired command is claimed again with new lease`() {
+        val device = registerDevice()
+
+        val created = commandService.create(
+            deviceId = device.id,
+            request = CreateCommandRequest(
+                type = "command.echo",
+                parameters = mapOf("message" to "Retry me")
+            )
+        )
+
+        val firstClaim = requireNotNull(
+            commandService.claimNext(device.id)
+        )
+
+        assertThat(firstClaim.id).isEqualTo(created.id)
+        assertThat(firstClaim.attemptCount).isEqualTo(1)
+        assertThat(firstClaim.leaseToken).isNotNull()
+
+        assertThat(commandService.claimNext(device.id))
+            .isNull()
+
+        clock.advance(Duration.ofSeconds(30))
+
+        val secondClaim = requireNotNull(
+            commandService.claimNext(device.id)
+        )
+
+        assertThat(secondClaim.id).isEqualTo(created.id)
+        assertThat(secondClaim.attemptCount).isEqualTo(2)
+        assertThat(secondClaim.leaseToken)
+            .isNotEqualTo(firstClaim.leaseToken)
+    }
+
+    @Test
+    fun `stale lease cannot complete reissued command`() {
+        val device = registerDevice()
+
+        commandService.create(
+            deviceId = device.id,
+            request = CreateCommandRequest(
+                type = "command.echo"
+            )
+        )
+
+        val firstClaim = requireNotNull(
+            commandService.claimNext(device.id)
+        )
+
+        clock.advance(Duration.ofSeconds(30))
+
+        val secondClaim = requireNotNull(
+            commandService.claimNext(device.id)
+        )
+
+        val exception = assertThrows(
+            ResponseStatusException::class.java
+        ) {
+            commandService.complete(
+                deviceId = device.id,
+                commandId = firstClaim.id,
+                request = CompleteCommandRequest(
+                    leaseToken = requireNotNull(
+                        firstClaim.leaseToken
+                    ),
+                    success = true,
+                    result = "Stale result"
+                )
+            )
+        }
+
+        assertThat(exception.statusCode)
+            .isEqualTo(HttpStatus.CONFLICT)
+
+        val completed = commandService.complete(
+            deviceId = device.id,
+            commandId = secondClaim.id,
+            request = CompleteCommandRequest(
+                leaseToken = requireNotNull(
+                    secondClaim.leaseToken
+                ),
+                success = true,
+                result = "Current result"
+            )
+        )
+
+        assertThat(completed.status)
+            .isEqualTo(CommandStatus.SUCCEEDED)
+
+        assertThat(completed.result)
+            .isEqualTo("Current result")
     }
 }

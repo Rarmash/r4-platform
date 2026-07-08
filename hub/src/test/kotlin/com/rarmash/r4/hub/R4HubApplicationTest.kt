@@ -57,6 +57,7 @@ class R4HubApplicationTest {
             deviceId = device.id,
             commandId = claimedCommand.id,
             request = CompleteCommandRequest(
+                leaseToken = requireNotNull(claimedCommand.leaseToken),
                 success = true,
                 result = "PostgreSQL works"
             )

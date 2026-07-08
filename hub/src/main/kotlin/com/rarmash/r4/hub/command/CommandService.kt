@@ -6,6 +6,7 @@ import com.rarmash.r4.protocol.command.CommandResponse
 import com.rarmash.r4.protocol.command.CommandStatus
 import com.rarmash.r4.protocol.command.CompleteCommandRequest
 import com.rarmash.r4.protocol.command.CreateCommandRequest
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.web.server.ResponseStatusException
@@ -17,8 +18,18 @@ import java.util.UUID
 class CommandService(
     private val commandRepository: CommandRepository,
     private val deviceRepository: DeviceRepository,
+
+    @Value("\${r4.commands.lease-duration-ms:30000}")
+    private val leaseDurationMs: Long,
+
     private val clock: Clock = Clock.systemUTC()
 ) {
+
+    init {
+        require(leaseDurationMs > 0) {
+            "r4.commands.lease-duration-ms must be greater than zero"
+        }
+    }
 
     fun create(
         deviceId: UUID,
@@ -47,15 +58,19 @@ class CommandService(
             status = CommandStatus.PENDING,
             result = null,
             error = null,
+            attemptCount = 0,
+            leaseExpiresAt = null,
+            leaseToken = null,
             createdAt = Instant.now(clock),
             startedAt = null,
             completedAt = null
         )
 
-        return commandRepository.save(command).toResponse()
+        return commandRepository
+            .save(command)
+            .toResponse()
     }
 
-    @Synchronized
     fun claimNext(deviceId: UUID): CommandResponse? {
         deviceRepository.findById(deviceId)
             ?: throw ResponseStatusException(
@@ -63,19 +78,16 @@ class CommandService(
                 "Device $deviceId not found"
             )
 
-        val command = commandRepository
-            .findAllByDeviceId(deviceId)
-            .firstOrNull { it.status == CommandStatus.PENDING }
-            ?: return null
+        val now = Instant.now(clock)
 
-        val runningCommand = command.copy(
-            status = CommandStatus.RUNNING,
-            startedAt = Instant.now(clock)
+        val command = commandRepository.claimNext(
+            deviceId = deviceId,
+            now = now,
+            leaseExpiresAt = now.plusMillis(leaseDurationMs),
+            leaseToken = UUID.randomUUID()
         )
 
-        return commandRepository
-            .save(runningCommand)
-            .toResponse()
+        return command?.toResponse()
     }
 
     fun complete(
@@ -83,44 +95,55 @@ class CommandService(
         commandId: UUID,
         request: CompleteCommandRequest
     ): CommandResponse {
-        val command = commandRepository.findById(commandId)
-            ?: throw ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Command $commandId not found"
-            )
+        val existingCommand =
+            commandRepository.findById(commandId)
+                ?: throw ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Command $commandId not found"
+                )
 
-        if (command.deviceId != deviceId) {
+        if (existingCommand.deviceId != deviceId) {
             throw ResponseStatusException(
                 HttpStatus.NOT_FOUND,
                 "Command $commandId does not belong to device $deviceId"
             )
         }
 
-        if (command.status != CommandStatus.RUNNING) {
+        if (existingCommand.status != CommandStatus.RUNNING) {
             throw ResponseStatusException(
                 HttpStatus.CONFLICT,
                 "Command $commandId is not running"
             )
         }
 
-        val completedCommand = command.copy(
-            status = if (request.success) {
-                CommandStatus.SUCCEEDED
+        val terminalStatus = if (request.success) {
+            CommandStatus.SUCCEEDED
+        } else {
+            CommandStatus.FAILED
+        }
+
+        val completed = commandRepository.complete(
+            commandId = commandId,
+            deviceId = deviceId,
+            leaseToken = request.leaseToken,
+            completedAt = Instant.now(clock),
+            status = terminalStatus,
+            result = if (request.success) {
+                request.result
             } else {
-                CommandStatus.FAILED
+                null
             },
-            result = if (request.success) request.result else null,
             error = if (request.success) {
                 null
             } else {
                 request.error ?: "Command failed"
-            },
-            completedAt = Instant.now(clock)
+            }
+        ) ?: throw ResponseStatusException(
+            HttpStatus.CONFLICT,
+            "Command lease expired or is no longer owned by this agent"
         )
 
-        return commandRepository
-            .save(completedCommand)
-            .toResponse()
+        return completed.toResponse()
     }
 
     fun getAll(deviceId: UUID): List<CommandResponse> {
@@ -144,6 +167,9 @@ class CommandService(
             status = status,
             result = result,
             error = error,
+            attemptCount = attemptCount,
+            leaseExpiresAt = leaseExpiresAt,
+            leaseToken = leaseToken,
             createdAt = createdAt,
             startedAt = startedAt,
             completedAt = completedAt

@@ -176,6 +176,9 @@ class SimulatorAgent(
         error: String? = null
     ) {
         try {
+            val leaseToken = command.leaseToken
+                ?: error("Running command ${command.id} has no lease token")
+
             hubRestClient
                 .post()
                 .uri(
@@ -185,6 +188,7 @@ class SimulatorAgent(
                 )
                 .body(
                     CompleteCommandRequest(
+                        leaseToken = leaseToken,
                         success = success,
                         result = result,
                         error = error

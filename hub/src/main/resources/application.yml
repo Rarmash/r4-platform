@@ -24,3 +24,6 @@ management:
 r4:
   devices:
     offline-after-ms: 25000
+
+  commands:
+    lease-duration-ms: 30000
