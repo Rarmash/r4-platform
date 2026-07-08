@@ -1,66 +1,61 @@
-# Развёртывание R4
+# R4 Deployment
 
-Документ описывает поставочные части Milestone 0.3: Docker-образ Hub, production-подобный Compose и публикацию в Docker Hub.
+This document covers the Hub Docker image, the production Compose stack, and Docker Hub publication.
 
-## Образ Hub
+## Hub Image
 
-Собрать образ Hub локально из корня репозитория:
+Build the Hub image from the repository root:
 
 ```bash
 docker build -f hub/Dockerfile -t r4-hub:local .
 ```
 
-Dockerfile использует Gradle Wrapper и собирает `:hub:bootJar`. Runtime-образ запускает `/app/r4-hub.jar` не от root и принимает JVM options через `JAVA_OPTS`.
+The Dockerfile uses the Gradle Wrapper to build `:hub:bootJar`. The runtime image runs `/app/r4-hub.jar` as a non-root user and accepts JVM options through `JAVA_OPTS`.
 
 ## Production Compose
 
-Создать environment-файл:
+Create the environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Отредактировать `.env` и задать как минимум:
+Set at least these values in `.env`:
 
 ```text
 R4_HUB_VERSION=0.1.0
 R4_DB_PASSWORD=<strong-password>
 ```
 
-Запустить Hub и PostgreSQL:
-
-```bash
-docker compose -f compose.production.yml --env-file .env up -d
-```
-
-Проверить конфигурацию без запуска контейнеров:
+Validate and start the stack:
 
 ```bash
 docker compose -f compose.production.yml --env-file .env config
+docker compose -f compose.production.yml --env-file .env up -d
 ```
 
-Обновить сервер после публикации нового образа:
+Update the stack after publishing a new image:
 
 ```bash
 docker compose -f compose.production.yml --env-file .env pull
 docker compose -f compose.production.yml --env-file .env up -d
 ```
 
-Compose-файл не использует `latest` как production default. Закрепляйте `R4_HUB_VERSION` на release tag вроде `0.1.0` или на неизменяемом коротком Git SHA tag.
+The Compose file does not use `latest` as its production default. Set `R4_HUB_VERSION` to a release version such as `0.1.0` or an immutable short Git SHA tag.
 
-## Публикация в Docker Hub
+## Docker Hub Publication
 
-Workflow `.github/workflows/docker-hub.yml` ожидает:
+The `.github/workflows/docker-hub.yml` workflow uses:
 
-- GitHub Actions variable `DOCKERHUB_USERNAME` или secret `DOCKERHUB_USERNAME`;
-- GitHub Actions secret `DOCKERHUB_TOKEN`.
+- the `DOCKERHUB_USERNAME` GitHub Actions variable or secret;
+- the `DOCKERHUB_TOKEN` GitHub Actions secret.
 
-Используйте Docker Hub access token, а не пароль аккаунта.
+Use a Docker Hub access token rather than an account password.
 
-Правила публикации:
+Publication behavior:
 
-- pull request: запустить тесты, собрать `:hub:bootJar`, собрать Docker image, не выполнять push;
-- push в `main`: опубликовать `edge` и короткий Git SHA tag;
-- Git tag `vX.Y.Z`: опубликовать semver tags и `latest`.
+- pull requests run tests and build the image without pushing it;
+- pushes to `main` publish `edge` and a short Git SHA tag;
+- Git tags in `vX.Y.Z` form publish semantic version tags and `latest`.
 
-В этом milestone собирается только `linux/amd64`. Если Hub позже потребуется запускать напрямую на ARM-устройстве вроде Orange Pi, нужно добавить отдельный ARM64 build path.
+The Hub image targets `linux/amd64`.
