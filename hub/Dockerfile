@@ -10,10 +10,6 @@ RUN chmod +x gradlew \
 
 FROM eclipse-temurin:21-jre-jammy
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 RUN useradd \
@@ -32,4 +28,4 @@ USER r4
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "/app/r4-hub.jar"]
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/r4-hub.jar"]

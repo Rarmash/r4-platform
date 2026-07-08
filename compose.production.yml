@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${R4_DB_NAME:-r4}
+      POSTGRES_USER: ${R4_DB_USERNAME:-r4}
+      POSTGRES_PASSWORD: ${R4_DB_PASSWORD}
+    volumes:
+      - r4_postgres_data:/var/lib/postgresql/data
+    networks:
+      - r4_internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  hub:
+    image: ${R4_HUB_IMAGE:-rarmash/r4-hub}:${R4_HUB_VERSION}
+    restart: unless-stopped
+    environment:
+      R4_DB_URL: jdbc:postgresql://postgres:5432/${R4_DB_NAME:-r4}
+      R4_DB_USERNAME: ${R4_DB_USERNAME:-r4}
+      R4_DB_PASSWORD: ${R4_DB_PASSWORD}
+      R4_DB_POOL_SIZE: ${R4_DB_POOL_SIZE:-5}
+      JAVA_OPTS: ${R4_HUB_JAVA_OPTS:-}
+    ports:
+      - "${R4_HUB_BIND_ADDRESS:-127.0.0.1}:${R4_HUB_PORT:-8080}:8080"
+    networks:
+      - r4_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  r4_postgres_data:
+
+networks:
+  r4_internal:
+    driver: bridge

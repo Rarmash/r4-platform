@@ -1,0 +1,23 @@
+[Unit]
+Description=R4 Linux Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=r4-agent
+Group=r4-agent
+EnvironmentFile=/etc/r4-agent/r4-agent.env
+WorkingDirectory=/opt/r4-agent
+ExecStart=/opt/r4-agent/bin/agent-linux
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/r4-agent
+
+[Install]
+WantedBy=multi-user.target
