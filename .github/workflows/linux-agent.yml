@@ -70,10 +70,11 @@ jobs:
             cd build/release
             sha256sum r4-agent-linux.tar.gz > r4-agent-linux.tar.gz.sha256
           )
-          tar -tzf build/release/r4-agent-linux.tar.gz | grep -qx 'r4-agent-linux/app/bin/agent-linux'
-          tar -tzf build/release/r4-agent-linux.tar.gz | grep -qx 'r4-agent-linux/deploy/r4-agent.service'
-          tar -tzf build/release/r4-agent-linux.tar.gz | grep -qx 'r4-agent-linux/install.sh'
-          tar -tzf build/release/r4-agent-linux.tar.gz | grep -qx 'r4-agent-linux/VERSION'
+          tar -tzf build/release/r4-agent-linux.tar.gz > build/release/archive-manifest.txt
+          grep -Fxq 'r4-agent-linux/app/bin/agent-linux' build/release/archive-manifest.txt
+          grep -Fxq 'r4-agent-linux/deploy/r4-agent.service' build/release/archive-manifest.txt
+          grep -Fxq 'r4-agent-linux/install.sh' build/release/archive-manifest.txt
+          grep -Fxq 'r4-agent-linux/VERSION' build/release/archive-manifest.txt
           (
             cd build/release
             sha256sum --check --strict r4-agent-linux.tar.gz.sha256
