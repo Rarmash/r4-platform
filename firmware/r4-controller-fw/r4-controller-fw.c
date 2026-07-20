@@ -6,13 +6,14 @@
 
 #include "hardware/adc.h"
 #include "pico/stdlib.h"
+#include "rgb_led.h"
 #include "tusb.h"
 
 // -----------------------------------------------------------------------------
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.2.0"
+#define R4_FIRMWARE_VERSION "0.3.0"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
@@ -22,14 +23,16 @@
 #define PIN_BUTTON_2     14
 #define PIN_STICK_BUTTON 11
 
-#define PIN_STICK_X      26
-#define PIN_STICK_Y      27
+#define PIN_STICK_X 26
+#define PIN_STICK_Y 27
 
-#define ADC_STICK_X      0
-#define ADC_STICK_Y      1
+#define PIN_RGB_LED 16
 
-#define ADC_MAX_VALUE    4095
-#define AXIS_DEADZONE    100
+#define ADC_STICK_X 0
+#define ADC_STICK_Y 1
+
+#define ADC_MAX_VALUE 4095
+#define AXIS_DEADZONE 100
 
 // -----------------------------------------------------------------------------
 // CDC service protocol
@@ -50,6 +53,10 @@ static uint16_t stick_center_y;
 
 static hid_gamepad_report_t latest_gamepad_report;
 
+static uint8_t led_red;
+static uint8_t led_green;
+static uint8_t led_blue;
+
 // -----------------------------------------------------------------------------
 // Hardware input
 // -----------------------------------------------------------------------------
@@ -58,14 +65,15 @@ static void initialize_button(uint gpio) {
     gpio_init(gpio);
     gpio_set_dir(gpio, GPIO_IN);
 
-    // Released = HIGH, pressed and connected to GND = LOW.
+    // Released = HIGH.
+    // Pressed and connected to GND = LOW.
     gpio_pull_up(gpio);
 }
 
 static uint16_t read_adc_input(uint input) {
     adc_select_input(input);
 
-    // Allow the ADC multiplexer to settle after changing channel.
+    // Allow the ADC multiplexer to settle after changing channels.
     sleep_us(5);
 
     return adc_read();
@@ -91,7 +99,8 @@ static void calibrate_stick_center(void) {
 
 static int8_t map_axis(uint16_t raw_value, uint16_t center) {
     int32_t delta =
-        (int32_t)raw_value - (int32_t)center;
+        (int32_t)raw_value -
+        (int32_t)center;
 
     if (
         delta > -AXIS_DEADZONE &&
@@ -104,7 +113,9 @@ static int8_t map_axis(uint16_t raw_value, uint16_t center) {
 
     if (delta > 0) {
         const int32_t available_range =
-            ADC_MAX_VALUE - center - AXIS_DEADZONE;
+            ADC_MAX_VALUE -
+            center -
+            AXIS_DEADZONE;
 
         if (available_range <= 0) {
             return 127;
@@ -115,7 +126,8 @@ static int8_t map_axis(uint16_t raw_value, uint16_t center) {
             available_range;
     } else {
         const int32_t available_range =
-            center - AXIS_DEADZONE;
+            center -
+            AXIS_DEADZONE;
 
         if (available_range <= 0) {
             return -127;
@@ -135,6 +147,26 @@ static int8_t map_axis(uint16_t raw_value, uint16_t center) {
     }
 
     return (int8_t)mapped_value;
+}
+
+// -----------------------------------------------------------------------------
+// RGB status LED
+// -----------------------------------------------------------------------------
+
+static void set_status_led(
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue
+) {
+    led_red = red;
+    led_green = green;
+    led_blue = blue;
+
+    rgb_led_set(red, green, blue);
+}
+
+static bool is_valid_color_component(int value) {
+    return value >= 0 && value <= 255;
 }
 
 // -----------------------------------------------------------------------------
@@ -218,7 +250,7 @@ void tud_hid_set_report_cb(
 }
 
 // -----------------------------------------------------------------------------
-// USB CDC service channel
+// USB CDC output
 // -----------------------------------------------------------------------------
 
 static void cdc_write_line(const char *text) {
@@ -227,50 +259,175 @@ static void cdc_write_line(const char *text) {
     tud_cdc_write_flush();
 }
 
+// -----------------------------------------------------------------------------
+// CDC command handlers
+// -----------------------------------------------------------------------------
+
+static void process_ping_command(void) {
+    cdc_write_line("PONG");
+}
+
+static void process_version_command(void) {
+    cdc_write_line(
+        "R4_CONTROLLER_FW " R4_FIRMWARE_VERSION
+    );
+}
+
+static void process_input_command(void) {
+    char response[96];
+
+    snprintf(
+        response,
+        sizeof(response),
+        "X=%d Y=%d BUTTONS=0x%08lX",
+        (int)latest_gamepad_report.x,
+        (int)latest_gamepad_report.y,
+        (unsigned long)latest_gamepad_report.buttons
+    );
+
+    cdc_write_line(response);
+}
+
+static void process_status_command(void) {
+    char response[128];
+
+    snprintf(
+        response,
+        sizeof(response),
+        "FW=%s LED=%u,%u,%u X=%d Y=%d BUTTONS=0x%08lX",
+        R4_FIRMWARE_VERSION,
+        (unsigned int)led_red,
+        (unsigned int)led_green,
+        (unsigned int)led_blue,
+        (int)latest_gamepad_report.x,
+        (int)latest_gamepad_report.y,
+        (unsigned long)latest_gamepad_report.buttons
+    );
+
+    cdc_write_line(response);
+}
+
+static void process_led_off_command(void) {
+    set_status_led(0, 0, 0);
+
+    cdc_write_line("OK LED OFF");
+}
+
+static void process_led_command(const char *command) {
+    int red;
+    int green;
+    int blue;
+    char trailing_character;
+
+    const int parsed_items = sscanf(
+        command,
+        "LED %d %d %d %c",
+        &red,
+        &green,
+        &blue,
+        &trailing_character
+    );
+
+    if (parsed_items != 3) {
+        cdc_write_line(
+            "ERR LED_USAGE"
+        );
+
+        return;
+    }
+
+    if (
+        !is_valid_color_component(red) ||
+        !is_valid_color_component(green) ||
+        !is_valid_color_component(blue)
+    ) {
+        cdc_write_line(
+            "ERR LED_RANGE"
+        );
+
+        return;
+    }
+
+    set_status_led(
+        (uint8_t)red,
+        (uint8_t)green,
+        (uint8_t)blue
+    );
+
+    char response[64];
+
+    snprintf(
+        response,
+        sizeof(response),
+        "OK LED %d %d %d",
+        red,
+        green,
+        blue
+    );
+
+    cdc_write_line(response);
+}
+
+static void process_help_command(void) {
+    cdc_write_line(
+        "COMMANDS PING VERSION INPUT STATUS "
+        "LED <R> <G> <B> LED OFF HELP"
+    );
+}
+
 static void process_cdc_command(void) {
     cdc_command_buffer[cdc_command_length] = '\0';
 
-    if (strcmp(cdc_command_buffer, "PING") == 0) {
-        cdc_write_line("PONG");
+    if (
+        strcmp(cdc_command_buffer, "PING") == 0
+    ) {
+        process_ping_command();
     } else if (
         strcmp(cdc_command_buffer, "VERSION") == 0
     ) {
-        cdc_write_line(
-            "R4_CONTROLLER_FW " R4_FIRMWARE_VERSION
-        );
+        process_version_command();
     } else if (
         strcmp(cdc_command_buffer, "INPUT") == 0
     ) {
-        char response[96];
-
-        snprintf(
-            response,
-            sizeof(response),
-            "X=%d Y=%d BUTTONS=0x%08lX",
-            (int)latest_gamepad_report.x,
-            (int)latest_gamepad_report.y,
-            (unsigned long)latest_gamepad_report.buttons
-        );
-
-        cdc_write_line(response);
+        process_input_command();
+    } else if (
+        strcmp(cdc_command_buffer, "STATUS") == 0
+    ) {
+        process_status_command();
+    } else if (
+        strcmp(cdc_command_buffer, "LED OFF") == 0
+    ) {
+        process_led_off_command();
     } else if (
         strcmp(cdc_command_buffer, "HELP") == 0
     ) {
-        cdc_write_line(
-            "COMMANDS PING VERSION INPUT HELP"
-        );
+        process_help_command();
+    } else if (
+        strncmp(cdc_command_buffer, "LED", 3) == 0
+    ) {
+        process_led_command(cdc_command_buffer);
     } else {
-        cdc_write_line("ERR UNKNOWN_COMMAND");
+        cdc_write_line(
+            "ERR UNKNOWN_COMMAND"
+        );
     }
 
     cdc_command_length = 0;
 }
 
+// -----------------------------------------------------------------------------
+// CDC input parser
+// -----------------------------------------------------------------------------
+
 static void process_cdc_character(uint8_t character) {
-    if (character == '\r' || character == '\n') {
+    if (
+        character == '\r' ||
+        character == '\n'
+    ) {
         if (cdc_discarding_line) {
             cdc_discarding_line = false;
             cdc_command_length = 0;
+
             return;
         }
 
@@ -285,7 +442,10 @@ static void process_cdc_character(uint8_t character) {
         return;
     }
 
-    if (character == '\b' || character == 0x7F) {
+    if (
+        character == '\b' ||
+        character == 0x7F
+    ) {
         if (cdc_command_length > 0) {
             --cdc_command_length;
         }
@@ -306,7 +466,9 @@ static void process_cdc_character(uint8_t character) {
     cdc_command_length = 0;
     cdc_discarding_line = true;
 
-    cdc_write_line("ERR LINE_TOO_LONG");
+    cdc_write_line(
+        "ERR LINE_TOO_LONG"
+    );
 }
 
 static void cdc_service_task(void) {
@@ -320,7 +482,9 @@ static void cdc_service_task(void) {
             );
 
         for (uint32_t i = 0; i < received; ++i) {
-            process_cdc_character(input_buffer[i]);
+            process_cdc_character(
+                input_buffer[i]
+            );
         }
     }
 }
@@ -338,6 +502,13 @@ int main(void) {
     adc_gpio_init(PIN_STICK_X);
     adc_gpio_init(PIN_STICK_Y);
 
+    rgb_led_init(PIN_RGB_LED);
+
+    // Short blue startup indication.
+    set_status_led(0, 0, 16);
+    sleep_ms(200);
+    set_status_led(0, 0, 0);
+
     calibrate_stick_center();
 
     const tusb_rhport_init_t usb_configuration = {
@@ -346,6 +517,9 @@ int main(void) {
     };
 
     if (!tud_rhport_init(0, &usb_configuration)) {
+        // Solid red indicates a USB initialization failure.
+        set_status_led(16, 0, 0);
+
         while (true) {
             tight_loop_contents();
         }
@@ -354,13 +528,16 @@ int main(void) {
     uint32_t previous_report_time_ms = 0;
 
     while (true) {
+        // TinyUSB must be serviced continuously.
         tud_task();
 
         // Process commands received through R4 Service.
         cdc_service_task();
 
         const uint32_t current_time_ms =
-            to_ms_since_boot(get_absolute_time());
+            to_ms_since_boot(
+                get_absolute_time()
+            );
 
         // Send the gamepad state approximately 200 times per second.
         if (

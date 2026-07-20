@@ -13,10 +13,16 @@ pico_sdk_init()
 add_executable(r4-controller-fw
     r4-controller-fw.c
     usb_descriptors.c
+    rgb_led.c
+)
+
+pico_generate_pio_header(
+    r4-controller-fw
+    ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio
 )
 
 pico_set_program_name(r4-controller-fw "r4-controller-fw")
-pico_set_program_version(r4-controller-fw "0.1.0")
+pico_set_program_version(r4-controller-fw "0.3.0")
 
 # USB полностью принадлежит TinyUSB HID.
 pico_enable_stdio_uart(r4-controller-fw 0)
@@ -30,6 +36,8 @@ target_include_directories(r4-controller-fw PRIVATE
 target_link_libraries(r4-controller-fw
     pico_stdlib
     hardware_adc
+    hardware_pio
+    hardware_clocks
     tinyusb_device
 )
 
