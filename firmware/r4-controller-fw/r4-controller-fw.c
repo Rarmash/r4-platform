@@ -13,11 +13,14 @@
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.6.0"
+#define R4_FIRMWARE_VERSION "0.7.0"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
 // -----------------------------------------------------------------------------
+
+#define PIN_BUTTON_L1 0
+#define PIN_BUTTON_R1 1
 
 #define PIN_DPAD_UP 2
 #define PIN_DPAD_DOWN 3
@@ -26,19 +29,24 @@
 
 #define PIN_BUTTON_X 6
 #define PIN_BUTTON_Y 7
-#define PIN_BUTTON_A 13
-#define PIN_BUTTON_B 14
+
+#define PIN_BUTTON_SELECT 8
+#define PIN_BUTTON_START 9
+#define PIN_BUTTON_HOTKEY 10
 
 #define PIN_LEFT_STICK_BUTTON 11
 #define PIN_RIGHT_STICK_BUTTON 12
+
+#define PIN_BUTTON_A 13
+#define PIN_BUTTON_B 14
+
+#define PIN_RGB_LED 16
 
 #define PIN_LEFT_STICK_X 26
 #define PIN_LEFT_STICK_Y 27
 
 #define PIN_RIGHT_STICK_X 28
 #define PIN_RIGHT_STICK_Y 29
-
-#define PIN_RGB_LED 16
 
 #define ADC_LEFT_STICK_X 0
 #define ADC_LEFT_STICK_Y 1
@@ -374,6 +382,26 @@ static void send_gamepad_report(void) {
 
     if (is_button_pressed(PIN_BUTTON_Y)) {
         report.buttons |= GAMEPAD_BUTTON_Y;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_L1)) {
+        report.buttons |= GAMEPAD_BUTTON_TL;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_R1)) {
+        report.buttons |= GAMEPAD_BUTTON_TR;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_SELECT)) {
+        report.buttons |= GAMEPAD_BUTTON_SELECT;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_START)) {
+        report.buttons |= GAMEPAD_BUTTON_START;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_HOTKEY)) {
+        report.buttons |= GAMEPAD_BUTTON_MODE;
     }
 
     if (
@@ -861,6 +889,9 @@ static void cdc_service_task(void) {
 // -----------------------------------------------------------------------------
 
 int main(void) {
+    initialize_button(PIN_BUTTON_L1);
+    initialize_button(PIN_BUTTON_R1);
+
     initialize_button(PIN_DPAD_UP);
     initialize_button(PIN_DPAD_DOWN);
     initialize_button(PIN_DPAD_LEFT);
@@ -868,8 +899,10 @@ int main(void) {
 
     initialize_button(PIN_BUTTON_X);
     initialize_button(PIN_BUTTON_Y);
-    initialize_button(PIN_BUTTON_A);
-    initialize_button(PIN_BUTTON_B);
+
+    initialize_button(PIN_BUTTON_SELECT);
+    initialize_button(PIN_BUTTON_START);
+    initialize_button(PIN_BUTTON_HOTKEY);
 
     initialize_button(
         PIN_LEFT_STICK_BUTTON
@@ -878,6 +911,9 @@ int main(void) {
     initialize_button(
         PIN_RIGHT_STICK_BUTTON
     );
+
+    initialize_button(PIN_BUTTON_A);
+    initialize_button(PIN_BUTTON_B);
 
     adc_init();
 

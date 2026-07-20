@@ -19,7 +19,12 @@ The current implementation supports:
 - dual analog sticks;
 - D-pad input;
 - ABXY buttons;
-- L3 and R3 buttons.
+- L1 and R1 shoulder buttons;
+- L3 and R3 buttons;
+- Start and Select buttons;
+- dedicated Hotkey button;
+- complete EmulationStation controller mapping;
+- standard `Hotkey + Start` emulator exit handling.
 
 ## Components
 
@@ -131,7 +136,7 @@ Example:
 ```text
 Service: running (PID 13095)
 State: online
-Controller: FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+Controller: FW=0.7.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 The service:
@@ -231,6 +236,8 @@ Example:
 2026-07-20 21:18:28 ACHIEVEMENT ID=143820 TITLE=Looking Better than Ever DESCRIPTION=Collect a Mushroom
 ```
 
+The complete achievement path has been verified during real gameplay.
+
 ## Service commands
 
 Check connectivity:
@@ -254,7 +261,7 @@ Read the firmware version:
 Expected response:
 
 ```text
-R4_CONTROLLER_FW 0.6.0
+R4_CONTROLLER_FW 0.7.0
 ```
 
 Read the current controller input:
@@ -278,7 +285,7 @@ Read complete controller state:
 Example:
 
 ```text
-FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+FW=0.7.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 Set a persistent LED color:
@@ -308,14 +315,18 @@ Show available commands:
 
 ## Current controller input
 
-Firmware `0.6.0` currently exposes:
+Firmware `0.7.0` currently exposes:
 
 - D-pad;
 - A, B, X and Y buttons;
+- L1 and R1 shoulder buttons;
 - left analog stick;
 - right analog stick;
 - left stick button;
-- right stick button.
+- right stick button;
+- Start;
+- Select;
+- dedicated Hotkey.
 
 Current HID mapping:
 
@@ -330,6 +341,11 @@ Current HID mapping:
 | B | `BtnB` |
 | X | `BtnX` |
 | Y | `BtnY` |
+| L1 | `BtnTL` |
+| R1 | `BtnTR` |
+| Select | `BtnSelect` |
+| Start | `BtnStart` |
+| Hotkey | `BtnMode` |
 | Left stick click | `BtnThumbL` |
 | Right stick click | `BtnThumbR` |
 
@@ -366,6 +382,11 @@ The current CDC button masks are:
 | B | `0x00000002` |
 | X | `0x00000008` |
 | Y | `0x00000010` |
+| L1 | `0x00000040` |
+| R1 | `0x00000080` |
+| Select | `0x00000400` |
+| Start | `0x00000800` |
+| Hotkey | `0x00001000` |
 | L3 | `0x00002000` |
 | R3 | `0x00004000` |
 
@@ -405,6 +426,11 @@ Button 0: A
 Button 1: B
 Button 3: X
 Button 4: Y
+Button 6: L1
+Button 7: R1
+Button 10: Select
+Button 11: Start
+Button 12: Hotkey
 Button 13: L3
 Button 14: R3
 ```
@@ -415,10 +441,32 @@ Exit `jstest` with:
 Ctrl+C
 ```
 
+## EmulationStation configuration
+
+The controller is detected as:
+
+```text
+Rarmash R4 Controller
+```
+
+The physical Hotkey button is mapped to:
+
+```text
+Hotkey Enable
+```
+
+The standard emulator exit combination is:
+
+```text
+Hotkey + Start
+```
+
+Analog L2 and R2 are not implemented yet and should be skipped during controller configuration.
+
 ## Supported firmware
 
 ```text
-R4_CONTROLLER_FW 0.6.0
+R4_CONTROLLER_FW 0.7.0
 ```
 
 ## Development USB identity
@@ -462,9 +510,7 @@ Runtime files and logs are not part of the repository.
 
 The current prototype does not yet include:
 
-- L1 and R1;
 - analog L2 and R2;
-- Start and Select;
 - Home;
 - Capture;
 - R4;
@@ -472,3 +518,9 @@ The current prototype does not yet include:
 - vibration;
 - the secondary display;
 - battery and power telemetry.
+
+All four external RP2040 ADC channels are already occupied by the two analog sticks.
+
+Additional analog inputs will require an external ADC or another analog input solution.
+
+Additional digital controls should use a GPIO expander, button matrix or another bus-based expansion solution.

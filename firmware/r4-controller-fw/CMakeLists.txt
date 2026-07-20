@@ -28,7 +28,7 @@ pico_set_program_name(
 
 pico_set_program_version(
     r4-controller-fw
-    "0.6.0"
+    "0.7.0"
 )
 
 pico_enable_stdio_uart(r4-controller-fw 0)

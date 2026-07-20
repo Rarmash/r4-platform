@@ -18,7 +18,10 @@ The current handheld prototype supports:
 - two analog sticks;
 - D-pad;
 - A, B, X and Y buttons;
+- L1 and R1 shoulder buttons;
 - left and right stick clicks;
+- Start and Select;
+- dedicated Hotkey button;
 - automatic stick-center calibration;
 - RGB status LED;
 - persistent system LED states;
@@ -27,12 +30,14 @@ The current handheld prototype supports:
 - automatic USB disconnect and reconnect handling;
 - Batocera game start and stop integration;
 - physical RetroAchievements indication;
-- Batocera integration installer.
+- Batocera integration installer;
+- complete controller configuration in EmulationStation;
+- verified gameplay and RetroAchievements operation.
 
 Current controller firmware:
 
 ```text
-R4_CONTROLLER_FW 0.6.0
+R4_CONTROLLER_FW 0.7.0
 ```
 
 ## Architecture
@@ -150,9 +155,12 @@ Current hardware capabilities:
 - composite USB HID and CDC device;
 - D-pad;
 - A, B, X and Y buttons;
+- L1 and R1 shoulder buttons;
 - left analog stick;
 - right analog stick;
 - left and right stick clicks;
+- Start and Select buttons;
+- dedicated Hotkey button;
 - RGB status indicator;
 - automatic analog-center calibration;
 - CDC command protocol;
@@ -162,16 +170,22 @@ Current hardware capabilities:
 
 | Function | RP2040 pin |
 |---|---|
+| L1 | GP0 |
+| R1 | GP1 |
 | D-pad Up | GP2 |
 | D-pad Down | GP3 |
 | D-pad Left | GP4 |
 | D-pad Right | GP5 |
 | X | GP6 |
 | Y | GP7 |
+| Select | GP8 |
+| Start | GP9 |
+| Hotkey | GP10 |
 | Left stick click | GP11 |
 | Right stick click | GP12 |
 | A | GP13 |
 | B | GP14 |
+| Unused prototype GPIO | GP15 |
 | RGB LED | GP16 |
 | Left stick X | GP26 / ADC0 |
 | Left stick Y | GP27 / ADC1 |
@@ -187,7 +201,11 @@ Released: HIGH
 Pressed: LOW
 ```
 
+The buttons must not be connected to `3V3` or `5V`.
+
 Both analog stick modules are powered from `3V3`.
+
+`GP15` is currently the only unused directly accessible GPIO in the breadboard prototype. Additional controls and peripherals should use bus-based expansion instead of relying on the remaining single pin.
 
 ## Current HID mapping
 
@@ -200,6 +218,11 @@ Both analog stick modules are powered from `3V3`.
 | B | Gamepad B |
 | X | Gamepad X |
 | Y | Gamepad Y |
+| L1 | Gamepad TL |
+| R1 | Gamepad TR |
+| Select | Gamepad Select |
+| Start | Gamepad Start |
+| Hotkey | Gamepad Mode |
 | Left stick click | Gamepad Thumb Left |
 | Right stick click | Gamepad Thumb Right |
 
@@ -215,6 +238,24 @@ Axis 5: unused Rz
 Axis 6: Hat0X
 Axis 7: Hat0Y
 ```
+
+Relevant Linux joystick buttons:
+
+```text
+Button 0: A
+Button 1: B
+Button 3: X
+Button 4: Y
+Button 6: L1
+Button 7: R1
+Button 10: Select
+Button 11: Start
+Button 12: Hotkey
+Button 13: L3
+Button 14: R3
+```
+
+The generic TinyUSB gamepad report exposes additional unused axes and buttons. Unused inputs remain inactive.
 
 ## Firmware toolchain
 
@@ -268,6 +309,24 @@ It provides:
 
 See [integration/batocera/README.md](integration/batocera/README.md) for installation, commands and diagnostics.
 
+## Controller configuration in Batocera
+
+The controller is exposed as:
+
+```text
+Rarmash R4 Controller
+```
+
+The dedicated `Hotkey` button is exposed as `BtnMode` and is assigned to Batocera's `Hotkey Enable` action.
+
+The standard emulator exit combination is:
+
+```text
+Hotkey + Start
+```
+
+The controller has been tested in EmulationStation and in an emulator using the complete current control layout.
+
 ## Controller service protocol
 
 Currently supported CDC commands:
@@ -292,7 +351,7 @@ LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 Example status response:
 
 ```text
-FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+FW=0.7.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 ## LED integration
@@ -312,6 +371,16 @@ Off: controller service stopped
 RetroAchievements trigger a temporary gold flash.
 
 Temporary effects are timed by the RP2040 and do not block Batocera scripts.
+
+The complete chain has been verified during real gameplay:
+
+```text
+RetroAchievements event
+→ Batocera achievement hook
+→ USB CDC command
+→ RP2040 LED effect
+→ persistent LED state restoration
+```
 
 ## Development USB identity
 
@@ -340,6 +409,7 @@ The planned final controller includes:
 - L1 and R1;
 - analog L2 and R2;
 - Start and Select;
+- Hotkey;
 - Home;
 - Capture;
 - R4;
@@ -350,16 +420,22 @@ The following inputs are already implemented:
 - D-pad;
 - ABXY;
 - two analog sticks;
-- L3 and R3.
+- L3 and R3;
+- L1 and R1;
+- Start and Select;
+- dedicated Hotkey.
 
 The next controller milestones are:
 
-- L1 and R1;
-- Start and Select;
-- system buttons;
-- analog trigger support.
+- analog L2 and R2;
+- Home;
+- Capture;
+- R4;
+- Trophy.
 
-Because all four RP2040 external ADC channels are already occupied by the two analog sticks, analog L2 and R2 will require an external ADC or another input solution.
+Because all four RP2040 external ADC channels are already occupied by the two analog sticks, analog L2 and R2 will require an external ADC or another analog input solution.
+
+Additional digital controls will require a GPIO expander, a button matrix or another bus-based input solution.
 
 ## Planned embedded-controller features
 
@@ -372,6 +448,16 @@ Future RP2040 responsibilities may include:
 - power sequencing;
 - watchdog functionality;
 - communication with battery-management hardware.
+
+The expected expansion architecture is:
+
+```text
+RP2040
+├── GPIO expander → additional digital controls
+├── external ADC  → analog L2 and R2
+├── display bus   → secondary display
+└── service bus   → power and battery hardware
+```
 
 ## License
 

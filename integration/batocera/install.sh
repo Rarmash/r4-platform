@@ -1,6 +1,6 @@
 #!/bin/sh
 
-EXPECTED_VERSION="R4_CONTROLLER_FW 0.6.0"
+EXPECTED_VERSION="R4_CONTROLLER_FW 0.7.0"
 
 SOURCE_DIR="$(
     cd "$(dirname "$0")" 2>/dev/null &&

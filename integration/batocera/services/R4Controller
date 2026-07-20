@@ -7,7 +7,7 @@ PID_FILE="/tmp/r4-controller-service.pid"
 STATE_FILE="/tmp/r4-controller-service.state"
 LOG_FILE="/userdata/system/r4/r4-controller.log"
 
-EXPECTED_VERSION="R4_CONTROLLER_FW 0.6.0"
+EXPECTED_VERSION="R4_CONTROLLER_FW 0.7.0"
 CHECK_INTERVAL=2
 
 log_message() {
