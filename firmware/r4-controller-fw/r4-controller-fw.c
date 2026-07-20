@@ -13,23 +13,31 @@
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.4.0"
+#define R4_FIRMWARE_VERSION "0.5.0"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
 // -----------------------------------------------------------------------------
 
-#define PIN_BUTTON_1     13
-#define PIN_BUTTON_2     14
-#define PIN_STICK_BUTTON 11
+#define PIN_BUTTON_1 13
+#define PIN_BUTTON_2 14
 
-#define PIN_STICK_X 26
-#define PIN_STICK_Y 27
+#define PIN_LEFT_STICK_BUTTON 11
+#define PIN_RIGHT_STICK_BUTTON 12
+
+#define PIN_LEFT_STICK_X 26
+#define PIN_LEFT_STICK_Y 27
+
+#define PIN_RIGHT_STICK_X 28
+#define PIN_RIGHT_STICK_Y 29
 
 #define PIN_RGB_LED 16
 
-#define ADC_STICK_X 0
-#define ADC_STICK_Y 1
+#define ADC_LEFT_STICK_X 0
+#define ADC_LEFT_STICK_Y 1
+
+#define ADC_RIGHT_STICK_X 2
+#define ADC_RIGHT_STICK_Y 3
 
 #define ADC_MAX_VALUE 4095
 #define AXIS_DEADZONE 100
@@ -48,8 +56,11 @@ static bool cdc_discarding_line;
 // Controller state
 // -----------------------------------------------------------------------------
 
-static uint16_t stick_center_x;
-static uint16_t stick_center_y;
+static uint16_t left_stick_center_x;
+static uint16_t left_stick_center_y;
+
+static uint16_t right_stick_center_x;
+static uint16_t right_stick_center_y;
 
 static hid_gamepad_report_t latest_gamepad_report;
 
@@ -93,25 +104,43 @@ static uint16_t read_adc_input(uint input) {
     return adc_read();
 }
 
-static void calibrate_stick_center(void) {
-    uint32_t sum_x = 0;
-    uint32_t sum_y = 0;
+static void calibrate_stick_centers(void) {
+    uint32_t left_sum_x = 0;
+    uint32_t left_sum_y = 0;
 
-    // The stick must remain released during startup calibration.
+    uint32_t right_sum_x = 0;
+    uint32_t right_sum_y = 0;
+
+    // Both sticks must remain released during startup calibration.
     sleep_ms(250);
 
     for (uint32_t i = 0; i < 128; ++i) {
-        sum_x += read_adc_input(ADC_STICK_X);
-        sum_y += read_adc_input(ADC_STICK_Y);
+        left_sum_x += read_adc_input(ADC_LEFT_STICK_X);
+        left_sum_y += read_adc_input(ADC_LEFT_STICK_Y);
+
+        right_sum_x += read_adc_input(ADC_RIGHT_STICK_X);
+        right_sum_y += read_adc_input(ADC_RIGHT_STICK_Y);
 
         sleep_ms(2);
     }
 
-    stick_center_x = (uint16_t)(sum_x / 128);
-    stick_center_y = (uint16_t)(sum_y / 128);
+    left_stick_center_x =
+        (uint16_t)(left_sum_x / 128);
+
+    left_stick_center_y =
+        (uint16_t)(left_sum_y / 128);
+
+    right_stick_center_x =
+        (uint16_t)(right_sum_x / 128);
+
+    right_stick_center_y =
+        (uint16_t)(right_sum_y / 128);
 }
 
-static int8_t map_axis(uint16_t raw_value, uint16_t center) {
+static int8_t map_axis(
+    uint16_t raw_value,
+    uint16_t center
+) {
     const int32_t delta =
         (int32_t)raw_value -
         (int32_t)center;
@@ -193,20 +222,9 @@ static void set_base_led(
     led_base_blue = blue;
 
     // Updating the base state must not interrupt a temporary flash.
-    // The new base color will be restored when the flash ends.
     if (!led_flash_active) {
         apply_led_output(red, green, blue);
     }
-}
-
-static void cancel_led_flash(void) {
-    led_flash_active = false;
-
-    apply_led_output(
-        led_base_red,
-        led_base_green,
-        led_base_blue
-    );
 }
 
 static void start_led_flash(
@@ -249,19 +267,27 @@ static void send_gamepad_report(void) {
 
     hid_gamepad_report_t report = {
         .x = map_axis(
-            read_adc_input(ADC_STICK_X),
-            stick_center_x
+            read_adc_input(ADC_LEFT_STICK_X),
+            left_stick_center_x
         ),
 
         .y = map_axis(
-            read_adc_input(ADC_STICK_Y),
-            stick_center_y
+            read_adc_input(ADC_LEFT_STICK_Y),
+            left_stick_center_y
+        ),
+
+        .rx = map_axis(
+            read_adc_input(ADC_RIGHT_STICK_X),
+            right_stick_center_x
+        ),
+
+        .ry = map_axis(
+            read_adc_input(ADC_RIGHT_STICK_Y),
+            right_stick_center_y
         ),
 
         .z = 0,
         .rz = 0,
-        .rx = 0,
-        .ry = 0,
 
         .hat = GAMEPAD_HAT_CENTERED,
         .buttons = 0
@@ -275,8 +301,12 @@ static void send_gamepad_report(void) {
         report.buttons |= GAMEPAD_BUTTON_B;
     }
 
-    if (!gpio_get(PIN_STICK_BUTTON)) {
+    if (!gpio_get(PIN_LEFT_STICK_BUTTON)) {
         report.buttons |= GAMEPAD_BUTTON_THUMBL;
+    }
+
+    if (!gpio_get(PIN_RIGHT_STICK_BUTTON)) {
+        report.buttons |= GAMEPAD_BUTTON_THUMBR;
     }
 
     latest_gamepad_report = report;
@@ -343,14 +373,16 @@ static void process_version_command(void) {
 }
 
 static void process_input_command(void) {
-    char response[96];
+    char response[128];
 
     snprintf(
         response,
         sizeof(response),
-        "X=%d Y=%d BUTTONS=0x%08lX",
+        "LX=%d LY=%d RX=%d RY=%d BUTTONS=0x%08lX",
         (int)latest_gamepad_report.x,
         (int)latest_gamepad_report.y,
+        (int)latest_gamepad_report.rx,
+        (int)latest_gamepad_report.ry,
         (unsigned long)latest_gamepad_report.buttons
     );
 
@@ -358,13 +390,17 @@ static void process_input_command(void) {
 }
 
 static void process_status_command(void) {
-    char response[192];
+    char response[256];
 
     snprintf(
         response,
         sizeof(response),
-        "FW=%s LED=%u,%u,%u BASE=%u,%u,%u FLASH=%u "
-        "X=%d Y=%d BUTTONS=0x%08lX",
+        "FW=%s "
+        "LED=%u,%u,%u "
+        "BASE=%u,%u,%u "
+        "FLASH=%u "
+        "LX=%d LY=%d RX=%d RY=%d "
+        "BUTTONS=0x%08lX",
         R4_FIRMWARE_VERSION,
 
         (unsigned int)led_output_red,
@@ -379,6 +415,9 @@ static void process_status_command(void) {
 
         (int)latest_gamepad_report.x,
         (int)latest_gamepad_report.y,
+        (int)latest_gamepad_report.rx,
+        (int)latest_gamepad_report.ry,
+
         (unsigned long)latest_gamepad_report.buttons
     );
 
@@ -397,7 +436,9 @@ static void process_led_off_command(void) {
     cdc_write_line("OK LED OFF");
 }
 
-static void process_led_command(const char *command) {
+static void process_led_command(
+    const char *command
+) {
     int red;
     int green;
     int blue;
@@ -446,7 +487,9 @@ static void process_led_command(const char *command) {
     cdc_write_line(response);
 }
 
-static void process_led_flash_command(const char *command) {
+static void process_led_flash_command(
+    const char *command
+) {
     int red;
     int green;
     int blue;
@@ -465,7 +508,10 @@ static void process_led_flash_command(const char *command) {
     );
 
     if (parsed_items != 4) {
-        cdc_write_line("ERR LED_FLASH_USAGE");
+        cdc_write_line(
+            "ERR LED_FLASH_USAGE"
+        );
+
         return;
     }
 
@@ -482,7 +528,10 @@ static void process_led_flash_command(const char *command) {
         duration_ms < 1 ||
         duration_ms > 10000
     ) {
-        cdc_write_line("ERR LED_DURATION_RANGE");
+        cdc_write_line(
+            "ERR LED_DURATION_RANGE"
+        );
+
         return;
     }
 
@@ -577,7 +626,9 @@ static void process_cdc_command(void) {
 // CDC input parser
 // -----------------------------------------------------------------------------
 
-static void process_cdc_character(uint8_t character) {
+static void process_cdc_character(
+    uint8_t character
+) {
     if (
         character == '\r' ||
         character == '\n'
@@ -654,11 +705,22 @@ static void cdc_service_task(void) {
 int main(void) {
     initialize_button(PIN_BUTTON_1);
     initialize_button(PIN_BUTTON_2);
-    initialize_button(PIN_STICK_BUTTON);
+
+    initialize_button(
+        PIN_LEFT_STICK_BUTTON
+    );
+
+    initialize_button(
+        PIN_RIGHT_STICK_BUTTON
+    );
 
     adc_init();
-    adc_gpio_init(PIN_STICK_X);
-    adc_gpio_init(PIN_STICK_Y);
+
+    adc_gpio_init(PIN_LEFT_STICK_X);
+    adc_gpio_init(PIN_LEFT_STICK_Y);
+
+    adc_gpio_init(PIN_RIGHT_STICK_X);
+    adc_gpio_init(PIN_RIGHT_STICK_Y);
 
     rgb_led_init(PIN_RGB_LED);
 
@@ -673,14 +735,19 @@ int main(void) {
     sleep_ms(200);
     apply_led_output(0, 0, 0);
 
-    calibrate_stick_center();
+    calibrate_stick_centers();
 
     const tusb_rhport_init_t usb_configuration = {
         .role = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_FULL
     };
 
-    if (!tud_rhport_init(0, &usb_configuration)) {
+    if (
+        !tud_rhport_init(
+            0,
+            &usb_configuration
+        )
+    ) {
         led_flash_active = false;
         set_base_led(16, 0, 0);
 
