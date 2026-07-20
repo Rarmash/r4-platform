@@ -5,8 +5,12 @@
 #include "tusb.h"
 
 #define USB_VID 0xCAFE
-#define USB_PID 0x4004
-#define USB_BCD 0x0100
+
+// Changed from 0x4004 so Windows enumerates the new composite layout
+// as a new device instead of reusing the old HID-only configuration.
+#define USB_PID 0x4005
+
+#define DEVICE_BCD_VERSION 0x0200
 
 // -----------------------------------------------------------------------------
 // Device descriptor
@@ -17,15 +21,16 @@ static tusb_desc_device_t const device_descriptor = {
     .bDescriptorType = TUSB_DESC_DEVICE,
     .bcdUSB = 0x0200,
 
-    .bDeviceClass = 0x00,
-    .bDeviceSubClass = 0x00,
-    .bDeviceProtocol = 0x00,
+    // Composite USB device using Interface Association Descriptors.
+    .bDeviceClass = TUSB_CLASS_MISC,
+    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol = MISC_PROTOCOL_IAD,
 
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = USB_BCD,
+    .bcdDevice = DEVICE_BCD_VERSION,
 
     .iManufacturer = 0x01,
     .iProduct = 0x02,
@@ -56,33 +61,57 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
 // -----------------------------------------------------------------------------
 
 enum {
+    ITF_NUM_CDC = 0,
+    ITF_NUM_CDC_DATA,
     ITF_NUM_HID,
     ITF_NUM_TOTAL
 };
 
-#define CONFIG_TOTAL_LENGTH (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
-#define HID_ENDPOINT_ADDRESS 0x81
+enum {
+    STRING_ID_LANGUAGE = 0,
+    STRING_ID_MANUFACTURER,
+    STRING_ID_PRODUCT,
+    STRING_ID_SERIAL,
+    STRING_ID_CDC,
+    STRING_ID_HID
+};
+
+#define CDC_NOTIFICATION_ENDPOINT 0x81
+#define CDC_OUT_ENDPOINT          0x02
+#define CDC_IN_ENDPOINT           0x82
+#define HID_IN_ENDPOINT           0x83
+
+#define CONFIG_TOTAL_LENGTH \
+    (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_HID_DESC_LEN)
 
 static uint8_t const configuration_descriptor[] = {
-    // Configuration number, interface count, string index,
-    // total length, attributes, maximum current in mA.
     TUD_CONFIG_DESCRIPTOR(
         1,
         ITF_NUM_TOTAL,
         0,
         CONFIG_TOTAL_LENGTH,
-        0,
+        0x00,
         100
     ),
 
-    // Interface, string index, protocol, report descriptor size,
-    // endpoint, endpoint buffer size, polling interval in ms.
+    // CDC ACM service channel.
+    TUD_CDC_DESCRIPTOR(
+        ITF_NUM_CDC,
+        STRING_ID_CDC,
+        CDC_NOTIFICATION_ENDPOINT,
+        16,
+        CDC_OUT_ENDPOINT,
+        CDC_IN_ENDPOINT,
+        64
+    ),
+
+    // HID gamepad.
     TUD_HID_DESCRIPTOR(
         ITF_NUM_HID,
-        0,
+        STRING_ID_HID,
         HID_ITF_PROTOCOL_NONE,
         sizeof(hid_report_descriptor),
-        HID_ENDPOINT_ADDRESS,
+        HID_IN_ENDPOINT,
         CFG_TUD_HID_EP_BUFSIZE,
         5
     )
@@ -97,23 +126,21 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
 // String descriptors
 // -----------------------------------------------------------------------------
 
-enum {
-    STRING_ID_LANGUAGE = 0,
-    STRING_ID_MANUFACTURER,
-    STRING_ID_PRODUCT,
-    STRING_ID_SERIAL
-};
-
 static char const *string_descriptors[] = {
-    (const char[]){0x09, 0x04}, // English, United States
+    (const char[]){0x09, 0x04},
     "Rarmash",
     "R4 Controller",
-    "R4-0001"
+    "R4-0001",
+    "R4 Service",
+    "R4 Gamepad"
 };
 
 static uint16_t string_descriptor_buffer[32];
 
-uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+uint16_t const *tud_descriptor_string_cb(
+    uint8_t index,
+    uint16_t langid
+) {
     (void)langid;
 
     size_t character_count;
@@ -124,10 +151,12 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
             string_descriptors[STRING_ID_LANGUAGE],
             2
         );
+
         character_count = 1;
     } else {
         const size_t descriptor_count =
-            sizeof(string_descriptors) / sizeof(string_descriptors[0]);
+            sizeof(string_descriptors) /
+            sizeof(string_descriptors[0]);
 
         if (index >= descriptor_count) {
             return NULL;
@@ -145,13 +174,16 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         }
 
         for (size_t i = 0; i < character_count; ++i) {
-            string_descriptor_buffer[1 + i] = (uint8_t)string[i];
+            string_descriptor_buffer[1 + i] =
+                (uint8_t)string[i];
         }
     }
 
     string_descriptor_buffer[0] =
-        (uint16_t)((TUSB_DESC_STRING << 8) |
-                   (2 * character_count + 2));
+        (uint16_t)(
+            (TUSB_DESC_STRING << 8) |
+            (2 * character_count + 2)
+        );
 
     return string_descriptor_buffer;
 }
