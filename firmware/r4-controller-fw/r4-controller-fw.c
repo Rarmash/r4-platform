@@ -13,14 +13,21 @@
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.5.1"
+#define R4_FIRMWARE_VERSION "0.6.0"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
 // -----------------------------------------------------------------------------
 
-#define PIN_BUTTON_1 13
-#define PIN_BUTTON_2 14
+#define PIN_DPAD_UP 2
+#define PIN_DPAD_DOWN 3
+#define PIN_DPAD_LEFT 4
+#define PIN_DPAD_RIGHT 5
+
+#define PIN_BUTTON_X 6
+#define PIN_BUTTON_Y 7
+#define PIN_BUTTON_A 13
+#define PIN_BUTTON_B 14
 
 #define PIN_LEFT_STICK_BUTTON 11
 #define PIN_RIGHT_STICK_BUTTON 12
@@ -91,6 +98,10 @@ static void initialize_button(uint gpio) {
     // Released = HIGH.
     // Pressed and connected to GND = LOW.
     gpio_pull_up(gpio);
+}
+
+static bool is_button_pressed(uint gpio) {
+    return !gpio_get(gpio);
 }
 
 static uint16_t read_adc_input(uint input) {
@@ -190,6 +201,65 @@ static int8_t map_axis(
     return (int8_t)mapped_value;
 }
 
+static uint8_t read_dpad_hat(void) {
+    bool up =
+        is_button_pressed(PIN_DPAD_UP);
+
+    bool down =
+        is_button_pressed(PIN_DPAD_DOWN);
+
+    bool left =
+        is_button_pressed(PIN_DPAD_LEFT);
+
+    bool right =
+        is_button_pressed(PIN_DPAD_RIGHT);
+
+    // Opposite directions cancel each other.
+    if (up && down) {
+        up = false;
+        down = false;
+    }
+
+    if (left && right) {
+        left = false;
+        right = false;
+    }
+
+    if (up) {
+        if (right) {
+            return GAMEPAD_HAT_UP_RIGHT;
+        }
+
+        if (left) {
+            return GAMEPAD_HAT_UP_LEFT;
+        }
+
+        return GAMEPAD_HAT_UP;
+    }
+
+    if (down) {
+        if (right) {
+            return GAMEPAD_HAT_DOWN_RIGHT;
+        }
+
+        if (left) {
+            return GAMEPAD_HAT_DOWN_LEFT;
+        }
+
+        return GAMEPAD_HAT_DOWN;
+    }
+
+    if (right) {
+        return GAMEPAD_HAT_RIGHT;
+    }
+
+    if (left) {
+        return GAMEPAD_HAT_LEFT;
+    }
+
+    return GAMEPAD_HAT_CENTERED;
+}
+
 // -----------------------------------------------------------------------------
 // RGB status LED
 // -----------------------------------------------------------------------------
@@ -286,23 +356,39 @@ static void send_gamepad_report(void) {
         .z = 0,
         .rz = 0,
 
-        .hat = GAMEPAD_HAT_CENTERED,
+        .hat = read_dpad_hat(),
         .buttons = 0
     };
 
-    if (!gpio_get(PIN_BUTTON_1)) {
+    if (is_button_pressed(PIN_BUTTON_A)) {
         report.buttons |= GAMEPAD_BUTTON_A;
     }
 
-    if (!gpio_get(PIN_BUTTON_2)) {
+    if (is_button_pressed(PIN_BUTTON_B)) {
         report.buttons |= GAMEPAD_BUTTON_B;
     }
 
-    if (!gpio_get(PIN_LEFT_STICK_BUTTON)) {
+    if (is_button_pressed(PIN_BUTTON_X)) {
+        report.buttons |= GAMEPAD_BUTTON_X;
+    }
+
+    if (is_button_pressed(PIN_BUTTON_Y)) {
+        report.buttons |= GAMEPAD_BUTTON_Y;
+    }
+
+    if (
+        is_button_pressed(
+            PIN_LEFT_STICK_BUTTON
+        )
+    ) {
         report.buttons |= GAMEPAD_BUTTON_THUMBL;
     }
 
-    if (!gpio_get(PIN_RIGHT_STICK_BUTTON)) {
+    if (
+        is_button_pressed(
+            PIN_RIGHT_STICK_BUTTON
+        )
+    ) {
         report.buttons |= GAMEPAD_BUTTON_THUMBR;
     }
 
@@ -440,16 +526,18 @@ static void process_version_command(void) {
 }
 
 static void process_input_command(void) {
-    char response[128];
+    char response[160];
 
     snprintf(
         response,
         sizeof(response),
-        "LX=%d LY=%d RX=%d RY=%d BUTTONS=0x%08lX",
+        "LX=%d LY=%d RX=%d RY=%d "
+        "HAT=%u BUTTONS=0x%08lX",
         (int)latest_gamepad_report.x,
         (int)latest_gamepad_report.y,
         (int)latest_gamepad_report.rx,
         (int)latest_gamepad_report.ry,
+        (unsigned int)latest_gamepad_report.hat,
         (unsigned long)latest_gamepad_report.buttons
     );
 
@@ -467,6 +555,7 @@ static void process_status_command(void) {
         "BASE=%u,%u,%u "
         "FLASH=%u "
         "LX=%d LY=%d RX=%d RY=%d "
+        "HAT=%u "
         "BUTTONS=0x%08lX",
         R4_FIRMWARE_VERSION,
 
@@ -484,6 +573,8 @@ static void process_status_command(void) {
         (int)latest_gamepad_report.y,
         (int)latest_gamepad_report.rx,
         (int)latest_gamepad_report.ry,
+
+        (unsigned int)latest_gamepad_report.hat,
 
         (unsigned long)latest_gamepad_report.buttons
     );
@@ -770,8 +861,15 @@ static void cdc_service_task(void) {
 // -----------------------------------------------------------------------------
 
 int main(void) {
-    initialize_button(PIN_BUTTON_1);
-    initialize_button(PIN_BUTTON_2);
+    initialize_button(PIN_DPAD_UP);
+    initialize_button(PIN_DPAD_DOWN);
+    initialize_button(PIN_DPAD_LEFT);
+    initialize_button(PIN_DPAD_RIGHT);
+
+    initialize_button(PIN_BUTTON_X);
+    initialize_button(PIN_BUTTON_Y);
+    initialize_button(PIN_BUTTON_A);
+    initialize_button(PIN_BUTTON_B);
 
     initialize_button(
         PIN_LEFT_STICK_BUTTON
