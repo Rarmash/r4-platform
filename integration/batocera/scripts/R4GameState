@@ -1,0 +1,35 @@
+#!/bin/sh
+
+LED_STATE="/userdata/system/r4/r4-led-state"
+LOG_FILE="/userdata/system/r4/r4-game-events.log"
+
+event="$1"
+system_name="$2"
+emulator="$3"
+core="$4"
+rom_path="$5"
+
+log_event() {
+    printf '%s EVENT=%s SYSTEM=%s EMULATOR=%s CORE=%s ROM=%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" \
+        "$event" \
+        "$system_name" \
+        "$emulator" \
+        "$core" \
+        "$rom_path" \
+        >> "$LOG_FILE"
+}
+
+case "$event" in
+    gameStart)
+        log_event
+        "$LED_STATE" set playing >/dev/null 2>&1
+        ;;
+
+    gameStop)
+        log_event
+        "$LED_STATE" set ready >/dev/null 2>&1
+        ;;
+esac
+
+exit 0

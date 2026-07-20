@@ -1,0 +1,77 @@
+#!/bin/sh
+
+ECCTL="/userdata/system/r4/r4-ecctl"
+MODE_FILE="/tmp/r4-controller-led-mode"
+
+apply_mode() {
+    mode="$1"
+
+    case "$mode" in
+        ready)
+            # Green: Batocera menu is ready.
+            "$ECCTL" LED 0 16 0
+            ;;
+
+        playing)
+            # Blue: a game is currently running.
+            "$ECCTL" LED 0 0 16
+            ;;
+
+        warning)
+            # Amber: connected, but attention is required.
+            "$ECCTL" LED 16 8 0
+            ;;
+
+        error)
+            # Red: system or controller error.
+            "$ECCTL" LED 16 0 0
+            ;;
+
+        off)
+            "$ECCTL" LED OFF
+            ;;
+
+        *)
+            echo "Unknown R4 LED mode: $mode" >&2
+            return 1
+            ;;
+    esac
+}
+
+case "$1" in
+    set)
+        mode="$2"
+
+        [ -n "$mode" ] || {
+            echo "Usage: $0 set <ready|playing|warning|error|off>" >&2
+            exit 1
+        }
+
+        printf '%s\n' "$mode" > "$MODE_FILE"
+        apply_mode "$mode"
+        ;;
+
+    apply)
+        if [ -f "$MODE_FILE" ]; then
+            mode="$(cat "$MODE_FILE")"
+        else
+            mode="ready"
+            printf '%s\n' "$mode" > "$MODE_FILE"
+        fi
+
+        apply_mode "$mode"
+        ;;
+
+    get)
+        if [ -f "$MODE_FILE" ]; then
+            cat "$MODE_FILE"
+        else
+            echo "ready"
+        fi
+        ;;
+
+    *)
+        echo "Usage: $0 {set <mode>|apply|get}" >&2
+        exit 1
+        ;;
+esac

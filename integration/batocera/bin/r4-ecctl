@@ -1,0 +1,128 @@
+#!/bin/sh
+
+EXPECTED_VID="cafe"
+EXPECTED_PID="4005"
+EXPECTED_SERIAL="R4-0001"
+
+LOCK_DIR="/tmp/r4-ecctl.lock"
+LOCK_HELD=0
+
+cleanup() {
+    if [ "$LOCK_HELD" -eq 1 ]; then
+        rm -rf "$LOCK_DIR"
+        LOCK_HELD=0
+    fi
+}
+
+trap cleanup 0
+trap 'exit 1' 1 2 15
+
+acquire_lock() {
+    attempt=0
+    max_attempts=5
+
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        if [ -f "$LOCK_DIR/pid" ]; then
+            lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+
+            if [ -n "$lock_pid" ] &&
+               ! kill -0 "$lock_pid" 2>/dev/null; then
+                rm -rf "$LOCK_DIR"
+                continue
+            fi
+        fi
+
+        attempt=$((attempt + 1))
+
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "R4 service channel is busy" >&2
+            return 1
+        fi
+
+        sleep 1
+    done
+
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    LOCK_HELD=1
+}
+
+find_r4_port() {
+    for device in /dev/ttyACM*; do
+        [ -e "$device" ] || continue
+
+        properties="$(
+            udevadm info \
+                --query=property \
+                --name="$device" \
+                2>/dev/null
+        )"
+
+        vid="$(
+            printf '%s\n' "$properties" |
+                sed -n 's/^ID_VENDOR_ID=//p'
+        )"
+
+        pid="$(
+            printf '%s\n' "$properties" |
+                sed -n 's/^ID_MODEL_ID=//p'
+        )"
+
+        serial="$(
+            printf '%s\n' "$properties" |
+                sed -n 's/^ID_SERIAL_SHORT=//p'
+        )"
+
+        interface="$(
+            printf '%s\n' "$properties" |
+                sed -n 's/^ID_USB_INTERFACE_NUM=//p'
+        )"
+
+        if [ "$vid" = "$EXPECTED_VID" ] &&
+           [ "$pid" = "$EXPECTED_PID" ] &&
+           [ "$serial" = "$EXPECTED_SERIAL" ] &&
+           [ "$interface" = "00" ]; then
+            printf '%s\n' "$device"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+if [ "$#" -eq 0 ]; then
+    command="PING"
+else
+    command="$*"
+fi
+
+acquire_lock || exit 1
+
+port="$(find_r4_port)" || {
+    echo "R4 embedded controller not found" >&2
+    exit 1
+}
+
+stty -F "$port" 115200 raw -echo || {
+    echo "Unable to configure $port" >&2
+    exit 1
+}
+
+exec 3<>"$port" || {
+    echo "Unable to open $port" >&2
+    exit 1
+}
+
+printf '%s\r\n' "$command" >&3
+
+response="$(timeout 2 head -n 1 <&3)"
+read_status=$?
+
+exec 3>&-
+
+if [ "$read_status" -eq 0 ] && [ -n "$response" ]; then
+    response="$(printf '%s' "$response" | tr -d '\r')"
+    printf '%s\n' "$response"
+else
+    echo "R4 embedded controller response timeout" >&2
+    exit 1
+fi

@@ -1,0 +1,16 @@
+#!/bin/sh
+
+ECCTL="/userdata/system/r4/r4-ecctl"
+LOG_FILE="/userdata/system/r4/r4-achievements.log"
+
+printf '%s ACHIEVEMENT ID=%s TITLE=%s DESCRIPTION=%s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" \
+    "$1" \
+    "$2" \
+    "$3" \
+    >> "$LOG_FILE"
+
+# RP2040 performs the timed flash and restores the base state itself.
+"$ECCTL" LED FLASH 32 12 0 1000 >/dev/null 2>&1
+
+exit 0

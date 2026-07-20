@@ -13,7 +13,7 @@
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.3.0"
+#define R4_FIRMWARE_VERSION "0.4.0"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
@@ -38,7 +38,7 @@
 // CDC service protocol
 // -----------------------------------------------------------------------------
 
-#define CDC_COMMAND_BUFFER_SIZE 64
+#define CDC_COMMAND_BUFFER_SIZE 96
 
 static char cdc_command_buffer[CDC_COMMAND_BUFFER_SIZE];
 static size_t cdc_command_length;
@@ -53,9 +53,23 @@ static uint16_t stick_center_y;
 
 static hid_gamepad_report_t latest_gamepad_report;
 
-static uint8_t led_red;
-static uint8_t led_green;
-static uint8_t led_blue;
+// -----------------------------------------------------------------------------
+// RGB LED state
+// -----------------------------------------------------------------------------
+
+// Persistent system state, such as ready or playing.
+static uint8_t led_base_red;
+static uint8_t led_base_green;
+static uint8_t led_base_blue;
+
+// Color currently visible on the physical LED.
+static uint8_t led_output_red;
+static uint8_t led_output_green;
+static uint8_t led_output_blue;
+
+// Temporary overlay, such as an achievement flash.
+static bool led_flash_active;
+static absolute_time_t led_flash_deadline;
 
 // -----------------------------------------------------------------------------
 // Hardware input
@@ -98,7 +112,7 @@ static void calibrate_stick_center(void) {
 }
 
 static int8_t map_axis(uint16_t raw_value, uint16_t center) {
-    int32_t delta =
+    const int32_t delta =
         (int32_t)raw_value -
         (int32_t)center;
 
@@ -153,20 +167,75 @@ static int8_t map_axis(uint16_t raw_value, uint16_t center) {
 // RGB status LED
 // -----------------------------------------------------------------------------
 
-static void set_status_led(
+static bool is_valid_color_component(int value) {
+    return value >= 0 && value <= 255;
+}
+
+static void apply_led_output(
     uint8_t red,
     uint8_t green,
     uint8_t blue
 ) {
-    led_red = red;
-    led_green = green;
-    led_blue = blue;
+    led_output_red = red;
+    led_output_green = green;
+    led_output_blue = blue;
 
     rgb_led_set(red, green, blue);
 }
 
-static bool is_valid_color_component(int value) {
-    return value >= 0 && value <= 255;
+static void set_base_led(
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue
+) {
+    led_base_red = red;
+    led_base_green = green;
+    led_base_blue = blue;
+
+    // Updating the base state must not interrupt a temporary flash.
+    // The new base color will be restored when the flash ends.
+    if (!led_flash_active) {
+        apply_led_output(red, green, blue);
+    }
+}
+
+static void cancel_led_flash(void) {
+    led_flash_active = false;
+
+    apply_led_output(
+        led_base_red,
+        led_base_green,
+        led_base_blue
+    );
+}
+
+static void start_led_flash(
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue,
+    uint32_t duration_ms
+) {
+    led_flash_active = true;
+
+    led_flash_deadline =
+        make_timeout_time_ms(duration_ms);
+
+    apply_led_output(red, green, blue);
+}
+
+static void led_task(void) {
+    if (
+        led_flash_active &&
+        time_reached(led_flash_deadline)
+    ) {
+        led_flash_active = false;
+
+        apply_led_output(
+            led_base_red,
+            led_base_green,
+            led_base_blue
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -289,16 +358,25 @@ static void process_input_command(void) {
 }
 
 static void process_status_command(void) {
-    char response[128];
+    char response[192];
 
     snprintf(
         response,
         sizeof(response),
-        "FW=%s LED=%u,%u,%u X=%d Y=%d BUTTONS=0x%08lX",
+        "FW=%s LED=%u,%u,%u BASE=%u,%u,%u FLASH=%u "
+        "X=%d Y=%d BUTTONS=0x%08lX",
         R4_FIRMWARE_VERSION,
-        (unsigned int)led_red,
-        (unsigned int)led_green,
-        (unsigned int)led_blue,
+
+        (unsigned int)led_output_red,
+        (unsigned int)led_output_green,
+        (unsigned int)led_output_blue,
+
+        (unsigned int)led_base_red,
+        (unsigned int)led_base_green,
+        (unsigned int)led_base_blue,
+
+        led_flash_active ? 1U : 0U,
+
         (int)latest_gamepad_report.x,
         (int)latest_gamepad_report.y,
         (unsigned long)latest_gamepad_report.buttons
@@ -308,7 +386,13 @@ static void process_status_command(void) {
 }
 
 static void process_led_off_command(void) {
-    set_status_led(0, 0, 0);
+    led_base_red = 0;
+    led_base_green = 0;
+    led_base_blue = 0;
+
+    led_flash_active = false;
+
+    apply_led_output(0, 0, 0);
 
     cdc_write_line("OK LED OFF");
 }
@@ -329,10 +413,7 @@ static void process_led_command(const char *command) {
     );
 
     if (parsed_items != 3) {
-        cdc_write_line(
-            "ERR LED_USAGE"
-        );
-
+        cdc_write_line("ERR LED_USAGE");
         return;
     }
 
@@ -341,14 +422,11 @@ static void process_led_command(const char *command) {
         !is_valid_color_component(green) ||
         !is_valid_color_component(blue)
     ) {
-        cdc_write_line(
-            "ERR LED_RANGE"
-        );
-
+        cdc_write_line("ERR LED_RANGE");
         return;
     }
 
-    set_status_led(
+    set_base_led(
         (uint8_t)red,
         (uint8_t)green,
         (uint8_t)blue
@@ -368,10 +446,74 @@ static void process_led_command(const char *command) {
     cdc_write_line(response);
 }
 
+static void process_led_flash_command(const char *command) {
+    int red;
+    int green;
+    int blue;
+
+    unsigned long duration_ms;
+    char trailing_character;
+
+    const int parsed_items = sscanf(
+        command,
+        "LED FLASH %d %d %d %lu %c",
+        &red,
+        &green,
+        &blue,
+        &duration_ms,
+        &trailing_character
+    );
+
+    if (parsed_items != 4) {
+        cdc_write_line("ERR LED_FLASH_USAGE");
+        return;
+    }
+
+    if (
+        !is_valid_color_component(red) ||
+        !is_valid_color_component(green) ||
+        !is_valid_color_component(blue)
+    ) {
+        cdc_write_line("ERR LED_RANGE");
+        return;
+    }
+
+    if (
+        duration_ms < 1 ||
+        duration_ms > 10000
+    ) {
+        cdc_write_line("ERR LED_DURATION_RANGE");
+        return;
+    }
+
+    start_led_flash(
+        (uint8_t)red,
+        (uint8_t)green,
+        (uint8_t)blue,
+        (uint32_t)duration_ms
+    );
+
+    char response[96];
+
+    snprintf(
+        response,
+        sizeof(response),
+        "OK LED FLASH %d %d %d %lu",
+        red,
+        green,
+        blue,
+        duration_ms
+    );
+
+    cdc_write_line(response);
+}
+
 static void process_help_command(void) {
     cdc_write_line(
         "COMMANDS PING VERSION INPUT STATUS "
-        "LED <R> <G> <B> LED OFF HELP"
+        "LED <R> <G> <B> "
+        "LED FLASH <R> <G> <B> <MS> "
+        "LED OFF HELP"
     );
 }
 
@@ -403,9 +545,25 @@ static void process_cdc_command(void) {
     ) {
         process_help_command();
     } else if (
-        strncmp(cdc_command_buffer, "LED", 3) == 0
+        strncmp(
+            cdc_command_buffer,
+            "LED FLASH ",
+            10
+        ) == 0
     ) {
-        process_led_command(cdc_command_buffer);
+        process_led_flash_command(
+            cdc_command_buffer
+        );
+    } else if (
+        strncmp(
+            cdc_command_buffer,
+            "LED",
+            3
+        ) == 0
+    ) {
+        process_led_command(
+            cdc_command_buffer
+        );
     } else {
         cdc_write_line(
             "ERR UNKNOWN_COMMAND"
@@ -504,10 +662,16 @@ int main(void) {
 
     rgb_led_init(PIN_RGB_LED);
 
+    led_base_red = 0;
+    led_base_green = 0;
+    led_base_blue = 0;
+
+    led_flash_active = false;
+
     // Short blue startup indication.
-    set_status_led(0, 0, 16);
+    apply_led_output(0, 0, 16);
     sleep_ms(200);
-    set_status_led(0, 0, 0);
+    apply_led_output(0, 0, 0);
 
     calibrate_stick_center();
 
@@ -517,8 +681,8 @@ int main(void) {
     };
 
     if (!tud_rhport_init(0, &usb_configuration)) {
-        // Solid red indicates a USB initialization failure.
-        set_status_led(16, 0, 0);
+        led_flash_active = false;
+        set_base_led(16, 0, 0);
 
         while (true) {
             tight_loop_contents();
@@ -528,11 +692,10 @@ int main(void) {
     uint32_t previous_report_time_ms = 0;
 
     while (true) {
-        // TinyUSB must be serviced continuously.
         tud_task();
 
-        // Process commands received through R4 Service.
         cdc_service_task();
+        led_task();
 
         const uint32_t current_time_ms =
             to_ms_since_boot(

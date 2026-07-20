@@ -22,7 +22,7 @@ pico_generate_pio_header(
 )
 
 pico_set_program_name(r4-controller-fw "r4-controller-fw")
-pico_set_program_version(r4-controller-fw "0.3.0")
+pico_set_program_version(r4-controller-fw "0.4.0")
 
 # USB полностью принадлежит TinyUSB HID.
 pico_enable_stdio_uart(r4-controller-fw 0)
