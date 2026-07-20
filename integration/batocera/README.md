@@ -52,6 +52,17 @@ chmod +x /userdata/system/scripts/R4GameState
 chmod +x /userdata/system/configs/emulationstation/scripts/achievements/R4Achievement
 ```
 
+## Installation
+
+Copy the integration directory to Batocera and execute the installer:
+
+```sh
+chmod +x install.sh
+./install.sh
+```
+
+The installer is idempotent and can also be used to update an existing installation. It stops the current controller service, replaces the installed files, restores executable permissions, enables the service and starts it again.
+
 ## Controller service
 
 Enable and start the watchdog:
