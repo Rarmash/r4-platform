@@ -15,7 +15,11 @@ The current implementation supports:
 - persistent LED states;
 - temporary non-blocking LED effects;
 - game start and stop events;
-- RetroAchievements notifications.
+- RetroAchievements notifications;
+- dual analog sticks;
+- D-pad input;
+- ABXY buttons;
+- L3 and R3 buttons.
 
 ## Components
 
@@ -127,7 +131,7 @@ Example:
 ```text
 Service: running (PID 13095)
 State: online
-Controller: FW=0.5.1 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 BUTTONS=0x00000000
+Controller: FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 The service:
@@ -247,6 +251,12 @@ Read the firmware version:
 /userdata/system/r4/r4-ecctl VERSION
 ```
 
+Expected response:
+
+```text
+R4_CONTROLLER_FW 0.6.0
+```
+
 Read the current controller input:
 
 ```sh
@@ -256,7 +266,7 @@ Read the current controller input:
 Example:
 
 ```text
-LX=0 LY=0 RX=0 RY=0 BUTTONS=0x00000000
+LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 Read complete controller state:
@@ -268,7 +278,7 @@ Read complete controller state:
 Example:
 
 ```text
-FW=0.5.1 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 BUTTONS=0x00000000
+FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 Set a persistent LED color:
@@ -298,33 +308,117 @@ Show available commands:
 
 ## Current controller input
 
-Firmware `0.5.1` currently exposes:
+Firmware `0.6.0` currently exposes:
 
+- D-pad;
+- A, B, X and Y buttons;
 - left analog stick;
 - right analog stick;
 - left stick button;
-- right stick button;
-- two face buttons.
+- right stick button.
 
 Current HID mapping:
 
 | Physical input | HID input |
 |---|---|
+| D-pad | `Hat0X` and `Hat0Y` |
 | Left stick X | `X` |
 | Left stick Y | `Y` |
 | Right stick X | `Rx` |
 | Right stick Y | `Ry` |
+| A | `BtnA` |
+| B | `BtnB` |
+| X | `BtnX` |
+| Y | `BtnY` |
 | Left stick click | `BtnThumbL` |
 | Right stick click | `BtnThumbR` |
-| Face button 1 | `BtnA` |
-| Face button 2 | `BtnB` |
 
-The D-pad, remaining face buttons, shoulder buttons and system buttons are planned but are not yet implemented.
+The generic TinyUSB gamepad report also exposes unused `Z` and `Rz` axes. They remain centered at zero.
+
+## D-pad values
+
+The CDC protocol reports the D-pad as a HID hat value:
+
+| Value | Direction |
+|---:|---|
+| `0` | Centered |
+| `1` | Up |
+| `2` | Up-right |
+| `3` | Right |
+| `4` | Down-right |
+| `5` | Down |
+| `6` | Down-left |
+| `7` | Left |
+| `8` | Up-left |
+
+Opposite directions on the same axis cancel each other:
+
+- Up and Down result in a neutral vertical direction.
+- Left and Right result in a neutral horizontal direction.
+
+## Button masks
+
+The current CDC button masks are:
+
+| Physical input | Button mask |
+|---|---|
+| A | `0x00000001` |
+| B | `0x00000002` |
+| X | `0x00000008` |
+| Y | `0x00000010` |
+| L3 | `0x00002000` |
+| R3 | `0x00004000` |
+
+Multiple pressed buttons are combined into one bit mask.
+
+## Input testing
+
+Check the short diagnostic response:
+
+```sh
+/userdata/system/r4/r4-ecctl INPUT
+```
+
+Test the Linux joystick interface:
+
+```sh
+jstest /dev/input/js0
+```
+
+The current joystick layout is:
+
+```text
+Axis 0: left stick X
+Axis 1: left stick Y
+Axis 2: unused Z
+Axis 3: right stick X
+Axis 4: right stick Y
+Axis 5: unused Rz
+Axis 6: Hat0X
+Axis 7: Hat0Y
+```
+
+Relevant Linux joystick buttons:
+
+```text
+Button 0: A
+Button 1: B
+Button 3: X
+Button 4: Y
+Button 13: L3
+Button 14: R3
+```
+
+Exit `jstest` with:
+
+```text
+Ctrl+C
+```
 
 ## Supported firmware
 
 ```text
-R4_CONTROLLER_FW 0.5.1
+R4_CONTROLLER_FW 0.6.0
 ```
 
 ## Development USB identity
@@ -334,6 +428,8 @@ The USB identifiers currently used during development are:
 ```text
 VID: cafe
 PID: 4005
+Manufacturer: Rarmash
+Product: R4 Controller
 Serial: R4-0001
 CDC interface: 00
 HID interface: 02
@@ -361,3 +457,18 @@ Persistent logs are stored in:
 ```
 
 Runtime files and logs are not part of the repository.
+
+## Remaining controller work
+
+The current prototype does not yet include:
+
+- L1 and R1;
+- analog L2 and R2;
+- Start and Select;
+- Home;
+- Capture;
+- R4;
+- Trophy;
+- vibration;
+- the secondary display;
+- battery and power telemetry.

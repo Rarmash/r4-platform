@@ -16,7 +16,8 @@ The current handheld prototype supports:
 
 - composite USB HID gamepad and CDC ACM service interface;
 - two analog sticks;
-- two face buttons;
+- D-pad;
+- A, B, X and Y buttons;
 - left and right stick clicks;
 - automatic stick-center calibration;
 - RGB status LED;
@@ -31,7 +32,7 @@ The current handheld prototype supports:
 Current controller firmware:
 
 ```text
-R4_CONTROLLER_FW 0.5.1
+R4_CONTROLLER_FW 0.6.0
 ```
 
 ## Architecture
@@ -147,32 +148,88 @@ firmware/r4-controller-fw
 Current hardware capabilities:
 
 - composite USB HID and CDC device;
+- D-pad;
+- A, B, X and Y buttons;
 - left analog stick;
 - right analog stick;
-- two face buttons;
 - left and right stick clicks;
 - RGB status indicator;
 - automatic analog-center calibration;
 - CDC command protocol;
 - non-blocking LED effects.
 
-Current prototype pin assignments:
+## Current prototype pin assignments
 
 | Function | RP2040 pin |
 |---|---|
+| D-pad Up | GP2 |
+| D-pad Down | GP3 |
+| D-pad Left | GP4 |
+| D-pad Right | GP5 |
+| X | GP6 |
+| Y | GP7 |
+| Left stick click | GP11 |
+| Right stick click | GP12 |
+| A | GP13 |
+| B | GP14 |
+| RGB LED | GP16 |
 | Left stick X | GP26 / ADC0 |
 | Left stick Y | GP27 / ADC1 |
 | Right stick X | GP28 / ADC2 |
 | Right stick Y | GP29 / ADC3 |
-| Left stick click | GP11 |
-| Right stick click | GP12 |
-| Face button A | GP13 |
-| Face button B | GP14 |
-| RGB LED | GP16 |
+
+All digital buttons are connected between their GPIO pin and GND.
+
+The firmware enables internal pull-up resistors:
+
+```text
+Released: HIGH
+Pressed: LOW
+```
 
 Both analog stick modules are powered from `3V3`.
 
-The firmware currently targets Pico SDK `2.3.0`.
+## Current HID mapping
+
+| Physical input | HID input |
+|---|---|
+| D-pad | Hat switch |
+| Left stick | X and Y |
+| Right stick | Rx and Ry |
+| A | Gamepad A |
+| B | Gamepad B |
+| X | Gamepad X |
+| Y | Gamepad Y |
+| Left stick click | Gamepad Thumb Left |
+| Right stick click | Gamepad Thumb Right |
+
+The current Linux joystick layout is:
+
+```text
+Axis 0: left stick X
+Axis 1: left stick Y
+Axis 2: unused Z
+Axis 3: right stick X
+Axis 4: right stick Y
+Axis 5: unused Rz
+Axis 6: Hat0X
+Axis 7: Hat0Y
+```
+
+## Firmware toolchain
+
+The firmware currently targets:
+
+```text
+Pico SDK 2.3.0
+```
+
+The project uses:
+
+- Pico SDK;
+- TinyUSB;
+- RP2040 ADC;
+- RP2040 PIO for the onboard WS2812 RGB LED.
 
 ## Build the controller firmware
 
@@ -187,6 +244,8 @@ The generated UF2 file is located at:
 ```text
 firmware/r4-controller-fw/build/r4-controller-fw.uf2
 ```
+
+During startup calibration, both analog sticks must remain released and centered.
 
 ## Batocera integration
 
@@ -224,11 +283,35 @@ LED OFF
 HELP
 ```
 
+Example input response:
+
+```text
+LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+```
+
 Example status response:
 
 ```text
-FW=0.5.1 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 BUTTONS=0x00000000
+FW=0.6.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
+
+## LED integration
+
+The RP2040 onboard WS2812 LED is currently used as a development status indicator.
+
+Persistent states are controlled by Batocera:
+
+```text
+Green: menu ready
+Blue: game running
+Amber: firmware mismatch
+Red: controller or system error
+Off: controller service stopped
+```
+
+RetroAchievements trigger a temporary gold flash.
+
+Temporary effects are timed by the RP2040 and do not block Batocera scripts.
 
 ## Development USB identity
 
@@ -240,6 +323,8 @@ PID: 4005
 Manufacturer: Rarmash
 Product: R4 Controller
 Serial: R4-0001
+CDC interface: 00
+HID interface: 02
 ```
 
 These identifiers are suitable for local development but must be reconsidered before public distribution.
@@ -260,7 +345,33 @@ The planned final controller includes:
 - R4;
 - Trophy.
 
-The next hardware milestone is the D-pad and complete ABXY input set.
+The following inputs are already implemented:
+
+- D-pad;
+- ABXY;
+- two analog sticks;
+- L3 and R3.
+
+The next controller milestones are:
+
+- L1 and R1;
+- Start and Select;
+- system buttons;
+- analog trigger support.
+
+Because all four RP2040 external ADC channels are already occupied by the two analog sticks, analog L2 and R2 will require an external ADC or another input solution.
+
+## Planned embedded-controller features
+
+Future RP2040 responsibilities may include:
+
+- vibration control;
+- secondary display output;
+- battery telemetry;
+- charging and power-state indication;
+- power sequencing;
+- watchdog functionality;
+- communication with battery-management hardware.
 
 ## License
 
