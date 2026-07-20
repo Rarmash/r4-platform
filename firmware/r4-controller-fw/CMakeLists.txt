@@ -28,10 +28,9 @@ pico_set_program_name(
 
 pico_set_program_version(
     r4-controller-fw
-    "0.5.0"
+    "0.5.1"
 )
 
-# USB is fully owned by the TinyUSB composite device.
 pico_enable_stdio_uart(r4-controller-fw 0)
 pico_enable_stdio_usb(r4-controller-fw 0)
 

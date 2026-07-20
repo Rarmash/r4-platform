@@ -13,7 +13,7 @@
 // Firmware information
 // -----------------------------------------------------------------------------
 
-#define R4_FIRMWARE_VERSION "0.5.0"
+#define R4_FIRMWARE_VERSION "0.5.1"
 
 // -----------------------------------------------------------------------------
 // Current breadboard pinout
@@ -47,6 +47,7 @@
 // -----------------------------------------------------------------------------
 
 #define CDC_COMMAND_BUFFER_SIZE 96
+#define CDC_WRITE_TIMEOUT_MS 1000
 
 static char cdc_command_buffer[CDC_COMMAND_BUFFER_SIZE];
 static size_t cdc_command_length;
@@ -68,17 +69,14 @@ static hid_gamepad_report_t latest_gamepad_report;
 // RGB LED state
 // -----------------------------------------------------------------------------
 
-// Persistent system state, such as ready or playing.
 static uint8_t led_base_red;
 static uint8_t led_base_green;
 static uint8_t led_base_blue;
 
-// Color currently visible on the physical LED.
 static uint8_t led_output_red;
 static uint8_t led_output_green;
 static uint8_t led_output_blue;
 
-// Temporary overlay, such as an achievement flash.
 static bool led_flash_active;
 static absolute_time_t led_flash_deadline;
 
@@ -221,7 +219,6 @@ static void set_base_led(
     led_base_green = green;
     led_base_blue = blue;
 
-    // Updating the base state must not interrupt a temporary flash.
     if (!led_flash_active) {
         apply_led_output(red, green, blue);
     }
@@ -352,10 +349,80 @@ void tud_hid_set_report_cb(
 // USB CDC output
 // -----------------------------------------------------------------------------
 
-static void cdc_write_line(const char *text) {
-    tud_cdc_write(text, strlen(text));
-    tud_cdc_write("\r\n", 2);
+static bool cdc_write_all(
+    const void *data,
+    size_t length
+) {
+    const uint8_t *bytes =
+        (const uint8_t *)data;
+
+    size_t offset = 0;
+
+    const absolute_time_t deadline =
+        make_timeout_time_ms(CDC_WRITE_TIMEOUT_MS);
+
+    while (offset < length) {
+        const uint32_t available =
+            tud_cdc_write_available();
+
+        if (available == 0) {
+            tud_cdc_write_flush();
+            tud_task();
+
+            if (time_reached(deadline)) {
+                return false;
+            }
+
+            tight_loop_contents();
+            continue;
+        }
+
+        const size_t remaining =
+            length - offset;
+
+        const uint32_t chunk_size =
+            remaining < available
+                ? (uint32_t)remaining
+                : available;
+
+        const uint32_t written =
+            tud_cdc_write(
+                bytes + offset,
+                chunk_size
+            );
+
+        offset += written;
+
+        tud_cdc_write_flush();
+        tud_task();
+
+        if (
+            written == 0 &&
+            time_reached(deadline)
+        ) {
+            return false;
+        }
+    }
+
     tud_cdc_write_flush();
+
+    return true;
+}
+
+static void cdc_write_line(const char *text) {
+    const size_t text_length =
+        strlen(text);
+
+    if (!cdc_write_all(text, text_length)) {
+        return;
+    }
+
+    static const char line_ending[] = "\r\n";
+
+    cdc_write_all(
+        line_ending,
+        sizeof(line_ending) - 1
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -769,7 +836,6 @@ int main(void) {
                 get_absolute_time()
             );
 
-        // Send the gamepad state approximately 200 times per second.
         if (
             current_time_ms -
             previous_report_time_ms >= 5

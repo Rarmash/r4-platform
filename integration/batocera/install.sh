@@ -1,6 +1,6 @@
 #!/bin/sh
 
-EXPECTED_VERSION="R4_CONTROLLER_FW 0.5.0"
+EXPECTED_VERSION="R4_CONTROLLER_FW 0.5.1"
 
 SOURCE_DIR="$(
     cd "$(dirname "$0")" 2>/dev/null &&
@@ -42,7 +42,6 @@ require_source_file \
 require_source_file \
     "$SOURCE_DIR/emulationstation/achievements/R4Achievement"
 
-# Stop the currently installed version before replacing its files.
 batocera-services stop "$SERVICE_NAME" \
     >/dev/null 2>&1 ||
     true
