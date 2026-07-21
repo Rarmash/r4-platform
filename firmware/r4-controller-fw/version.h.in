@@ -1,0 +1,3 @@
+#pragma once
+
+#define R4_FIRMWARE_VERSION "@R4_FIRMWARE_VERSION@"

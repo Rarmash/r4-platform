@@ -8,6 +8,14 @@ include(pico_sdk_import.cmake)
 
 project(r4-controller-fw C CXX ASM)
 
+set(R4_FIRMWARE_VERSION "0.7.0")
+
+configure_file(
+    version.h.in
+    version.h
+    @ONLY
+)
+
 pico_sdk_init()
 
 add_executable(r4-controller-fw
@@ -28,7 +36,7 @@ pico_set_program_name(
 
 pico_set_program_version(
     r4-controller-fw
-    "0.7.0"
+    "${R4_FIRMWARE_VERSION}"
 )
 
 pico_enable_stdio_uart(r4-controller-fw 0)
@@ -38,6 +46,7 @@ target_include_directories(
     r4-controller-fw
     PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 target_link_libraries(
