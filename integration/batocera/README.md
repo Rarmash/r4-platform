@@ -20,7 +20,7 @@ The current implementation supports:
 - D-pad input;
 - ABXY buttons;
 - L1 and R1 shoulder buttons;
-- L3 and R3 buttons;
+- left and right stick clicks (L3 and R3);
 - Start and Select buttons;
 - dedicated Hotkey button;
 - complete EmulationStation controller mapping;
@@ -349,8 +349,8 @@ Current HID mapping:
 | Select | `BtnSelect` |
 | Start | `BtnStart` |
 | Hotkey | `BtnMode` |
-| Left stick click | `BtnThumbL` |
-| Right stick click | `BtnThumbR` |
+| Left stick click (L3) | `BtnThumbL` |
+| Right stick click (R3) | `BtnThumbR` |
 
 The generic TinyUSB gamepad report also exposes unused `Z` and `Rz` axes. They remain centered at zero.
 
@@ -390,8 +390,8 @@ The current CDC button masks are:
 | Select | `0x00000400` |
 | Start | `0x00000800` |
 | Hotkey | `0x00001000` |
-| L3 | `0x00002000` |
-| R3 | `0x00004000` |
+| Left stick click (L3) | `0x00002000` |
+| Right stick click (R3) | `0x00004000` |
 
 Multiple pressed buttons are combined into one bit mask.
 
@@ -434,8 +434,8 @@ Button 7: R1
 Button 10: Select
 Button 11: Start
 Button 12: Hotkey
-Button 13: L3
-Button 14: R3
+Button 13: left stick click (L3 / BtnThumbL)
+Button 14: right stick click (R3 / BtnThumbR)
 ```
 
 Exit `jstest` with:
