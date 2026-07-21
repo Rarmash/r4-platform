@@ -34,10 +34,10 @@ Install a specific release:
 curl -fsSL https://raw.githubusercontent.com/Rarmash/r4-platform/main/agent-linux/install.sh \
   | sudo bash -s -- install \
       --hub-url "https://hub.example.com" \
-      --version v0.1.0
+      --version agent-v0.1.0
 ```
 
-Versions in `0.1.0` form are normalized to `v0.1.0`.
+Versions in `0.1.0` form are normalized to `agent-v0.1.0`.
 
 ## Manage the Agent
 
@@ -51,7 +51,7 @@ Update to the latest release or a specific release:
 
 ```bash
 sudo r4-agentctl update
-sudo r4-agentctl update --version v0.1.0
+sudo r4-agentctl update --version agent-v0.1.0
 ```
 
 An update preserves `/etc/r4-agent/r4-agent.env` and `/var/lib/r4-agent`, including `agent-id`. The existing application remains available until the new archive has been downloaded, verified, and unpacked. A failed service start restores the previous application.
@@ -133,7 +133,20 @@ sudo systemctl enable --now r4-agent
 
 Edit `/etc/r4-agent/r4-agent.env` before starting the service when the Hub is not available at its default URL.
 
-## Build a Release Package
+## Releases
+
+Linux Agent releases use `agent-vX.Y.Z` Git tags. For example:
+
+```bash
+git tag agent-v0.2.0
+git push origin agent-v0.2.0
+```
+
+The `Linux Agent` GitHub Actions workflow runs for pull requests and relevant pushes to `main`, but publishes a GitHub Release only for an `agent-vX.Y.Z` tag. The GitHub Release keeps the complete source tag as its name, while the archive's `VERSION` file contains only `X.Y.Z`.
+
+Hub tags use the separate `hub-vX.Y.Z` namespace and do not trigger an Agent release.
+
+## Release package
 
 The release archive has this structure:
 
@@ -149,4 +162,4 @@ r4-agent-linux/
 └── VERSION
 ```
 
-The `Linux Agent` GitHub Actions workflow tests the agent, validates the installer, builds this archive, verifies its checksum and structure, and attaches both files to tagged releases.
+The workflow tests the agent, validates the installer, builds this archive, verifies its checksum and structure, and attaches the archive and checksum to the matching Agent release.

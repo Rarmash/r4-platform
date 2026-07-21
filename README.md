@@ -63,7 +63,6 @@ r4-platform/
 │       └── README.md
 ├── protocol/
 ├── simulator/
-├── tools/
 ├── build.gradle.kts
 ├── compose.production.yml
 ├── docker-compose.yml
@@ -81,7 +80,7 @@ Build and check all JVM modules:
 ./gradlew clean check
 ```
 
-On Windows, use `./gradlew.bat clean check`.
+On Windows, use `.\gradlew.bat clean check`.
 
 Run the Hub:
 

@@ -56,6 +56,10 @@ Publication behavior:
 
 - pull requests run tests and build the image without pushing it;
 - pushes to `main` publish `edge` and a short Git SHA tag;
-- Git tags in `vX.Y.Z` form publish semantic version tags and `latest`.
+- Git tags in `hub-vX.Y.Z` form publish the Docker tags `X.Y.Z`, `X.Y`, and `latest`.
+
+For example, creating and pushing `hub-v0.2.0` publishes `r4-hub:0.2.0`, `r4-hub:0.2`, and `r4-hub:latest`. The `hub-v` prefix is used only by the repository tag and is not part of the Docker image tag.
+
+Hub and Linux Agent versions are independent. An `agent-vX.Y.Z` tag is handled only by the Linux Agent workflow and does not publish a Hub image. Likewise, a `hub-vX.Y.Z` tag does not create a Linux Agent release.
 
 The Hub image targets `linux/amd64`.

@@ -57,7 +57,7 @@ Commands:
 Options:
   --hub-url URL     R4 Hub base URL. Required for the first installation.
   --name NAME       Agent name. Defaults to the system hostname.
-  --version VERSION Release version: latest, vX.Y.Z, or X.Y.Z.
+  --version VERSION Release version: latest, agent-vX.Y.Z, or X.Y.Z.
   --purge           Also remove configuration, identity, user, and group.
   --yes             Confirm a non-interactive purge.
   -h, --help        Show this help.
@@ -142,10 +142,10 @@ normalize_version() {
         return
     fi
     if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        VERSION="v${VERSION}"
+        VERSION="agent-v${VERSION}"
     fi
-    [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-        die "invalid version '${VERSION}'; use latest, vX.Y.Z, or X.Y.Z"
+    [[ "${VERSION}" =~ ^agent-v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        die "invalid version '${VERSION}'; use latest, agent-vX.Y.Z, or X.Y.Z"
 }
 
 validate_hub_url() {

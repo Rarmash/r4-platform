@@ -15,7 +15,7 @@ on:
     branches:
       - main
     tags:
-      - "v*.*.*"
+      - "agent-v*.*.*"
     paths:
       - "agent-linux/**"
       - "protocol/**"
@@ -53,17 +53,21 @@ jobs:
           shellcheck agent-linux/install.sh
 
       - name: Build and inspect release package
-        env:
-          PACKAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'development' }}
         run: |
           set -Eeuo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/agent-v* ]]; then
+            package_version="${GITHUB_REF_NAME#agent-v}"
+            [[ "${package_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          else
+            package_version="development"
+          fi
           package_dir="build/release/r4-agent-linux"
           mkdir -p "${package_dir}/app" "${package_dir}/deploy"
           cp -a agent-linux/build/install/agent-linux/. "${package_dir}/app/"
           cp agent-linux/deploy/r4-agent.service "${package_dir}/deploy/"
           cp agent-linux/deploy/r4-agent.env.example "${package_dir}/deploy/"
           cp agent-linux/install.sh "${package_dir}/"
-          printf '%s\n' "${PACKAGE_VERSION}" > "${package_dir}/VERSION"
+          printf '%s\n' "${package_version}" > "${package_dir}/VERSION"
           chmod 0755 "${package_dir}/install.sh" "${package_dir}/app/bin/agent-linux"
           tar -C build/release -czf "build/release/r4-agent-linux.tar.gz" r4-agent-linux
           (
@@ -90,7 +94,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/agent-v')
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -110,6 +114,7 @@ jobs:
         run: |
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
             || gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
               --generate-notes \
               --verify-tag
 
