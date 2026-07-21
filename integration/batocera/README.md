@@ -30,6 +30,7 @@ The current implementation supports:
 
 - `bin/r4-ecctl` — discovers the RP2040 CDC interface and sends service commands.
 - `bin/r4-led-state` — stores and applies the current persistent LED mode.
+- `firmware-version.conf` — defines the expected RP2040 firmware version.
 - `services/R4Controller` — monitors the embedded controller and handles reconnection.
 - `scripts/R4GameState` — changes the LED state when a game starts or stops.
 - `emulationstation/achievements/R4Achievement` — triggers a temporary achievement flash.
@@ -39,6 +40,7 @@ The current implementation supports:
 
 ```text
 integration/batocera/
+├── firmware-version.conf
 ├── bin/
 │   ├── r4-ecctl
 │   └── r4-led-state
@@ -59,6 +61,7 @@ integration/batocera/
 |---|---|
 | `bin/r4-ecctl` | `/userdata/system/r4/r4-ecctl` |
 | `bin/r4-led-state` | `/userdata/system/r4/r4-led-state` |
+| `firmware-version.conf` | `/userdata/system/r4/firmware-version.conf` |
 | `services/R4Controller` | `/userdata/system/services/R4Controller` |
 | `scripts/R4GameState` | `/userdata/system/scripts/R4GameState` |
 | `emulationstation/achievements/R4Achievement` | `/userdata/system/configs/emulationstation/scripts/achievements/R4Achievement` |
@@ -136,7 +139,7 @@ Example:
 ```text
 Service: running (PID 13095)
 State: online
-Controller: FW=0.7.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+Controller: FW=&lt;configured-version&gt; LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 The service:
@@ -261,7 +264,7 @@ Read the firmware version:
 Expected response:
 
 ```text
-R4_CONTROLLER_FW 0.7.0
+R4_CONTROLLER_FW &lt;configured-version&gt;
 ```
 
 Read the current controller input:
@@ -285,7 +288,7 @@ Read complete controller state:
 Example:
 
 ```text
-FW=0.7.0 LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+FW=&lt;configured-version&gt; LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
 ```
 
 Set a persistent LED color:
@@ -315,7 +318,7 @@ Show available commands:
 
 ## Current controller input
 
-Firmware `0.7.0` currently exposes:
+The configured firmware version currently exposes:
 
 - D-pad;
 - A, B, X and Y buttons;
@@ -465,9 +468,8 @@ Analog L2 and R2 are not implemented yet and should be skipped during controller
 
 ## Supported firmware
 
-```text
-R4_CONTROLLER_FW 0.7.0
-```
+The expected version is defined in `firmware-version.conf` and installed to
+`/userdata/system/r4/firmware-version.conf`.
 
 ## Development USB identity
 

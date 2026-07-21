@@ -1,7 +1,5 @@
 #!/bin/sh
 
-EXPECTED_VERSION="R4_CONTROLLER_FW 0.7.0"
-
 SOURCE_DIR="$(
     cd "$(dirname "$0")" 2>/dev/null &&
     pwd
@@ -14,6 +12,7 @@ SCRIPT_DIR="/userdata/system/scripts"
 ACHIEVEMENT_DIR="/userdata/system/configs/emulationstation/scripts/achievements"
 
 SERVICE_NAME="R4Controller"
+VERSION_CONFIG_NAME="firmware-version.conf"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -24,6 +23,33 @@ require_source_file() {
     [ -f "$1" ] ||
         fail "Required source file is missing: $1"
 }
+
+load_firmware_version() {
+    version_config_file="$1"
+
+    [ -f "$version_config_file" ] ||
+        fail "Firmware version configuration is missing: $version_config_file"
+
+    version_config_line_count="$(wc -l < "$version_config_file" 2>/dev/null)" ||
+        fail "Unable to read firmware version configuration: $version_config_file"
+
+    [ "$version_config_line_count" -eq 1 ] 2>/dev/null ||
+        fail "Invalid firmware version configuration: $version_config_file"
+
+    version_config_line="$(cat "$version_config_file" 2>/dev/null)" ||
+        fail "Unable to read firmware version configuration: $version_config_file"
+
+    printf '%s\n' "$version_config_line" |
+        grep -Eq '^R4_FIRMWARE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' ||
+        fail "Invalid firmware version configuration: $version_config_file"
+
+    R4_FIRMWARE_VERSION="${version_config_line#R4_FIRMWARE_VERSION=}"
+}
+
+VERSION_CONFIG_SOURCE="$SOURCE_DIR/$VERSION_CONFIG_NAME"
+
+load_firmware_version "$VERSION_CONFIG_SOURCE"
+EXPECTED_VERSION="R4_CONTROLLER_FW $R4_FIRMWARE_VERSION"
 
 echo "Installing R4 Batocera integration..."
 
@@ -69,6 +95,11 @@ cp \
     fail "Unable to install r4-led-state"
 
 cp \
+    "$VERSION_CONFIG_SOURCE" \
+    "$R4_DIR/$VERSION_CONFIG_NAME" ||
+    fail "Unable to install $VERSION_CONFIG_NAME"
+
+cp \
     "$SOURCE_DIR/services/R4Controller" \
     "$SERVICE_DIR/R4Controller" ||
     fail "Unable to install R4Controller service"
@@ -101,6 +132,7 @@ echo
 echo "Installed files:"
 echo "  $R4_DIR/r4-ecctl"
 echo "  $R4_DIR/r4-led-state"
+echo "  $R4_DIR/$VERSION_CONFIG_NAME"
 echo "  $SERVICE_DIR/R4Controller"
 echo "  $SCRIPT_DIR/R4GameState"
 echo "  $ACHIEVEMENT_DIR/R4Achievement"

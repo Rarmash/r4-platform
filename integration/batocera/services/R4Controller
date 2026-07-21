@@ -6,8 +6,8 @@ LED_STATE="/userdata/system/r4/r4-led-state"
 PID_FILE="/tmp/r4-controller-service.pid"
 STATE_FILE="/tmp/r4-controller-service.state"
 LOG_FILE="/userdata/system/r4/r4-controller.log"
+VERSION_CONFIG_FILE="/userdata/system/r4/firmware-version.conf"
 
-EXPECTED_VERSION="R4_CONTROLLER_FW 0.7.0"
 CHECK_INTERVAL=2
 
 log_message() {
@@ -41,7 +41,37 @@ set_state() {
     printf '%s\n' "$1" > "$STATE_FILE"
 }
 
+load_expected_version() {
+    if [ ! -f "$VERSION_CONFIG_FILE" ]; then
+        log_message \
+            "Firmware version configuration is missing: $VERSION_CONFIG_FILE"
+        return 1
+    fi
+
+    version_config_line_count="$(wc -l < "$VERSION_CONFIG_FILE" 2>/dev/null)" ||
+        return 1
+
+    version_config_line="$(cat "$VERSION_CONFIG_FILE" 2>/dev/null)" ||
+        return 1
+
+    if [ "$version_config_line_count" -ne 1 ] 2>/dev/null ||
+       ! printf '%s\n' "$version_config_line" |
+           grep -Eq '^R4_FIRMWARE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'; then
+        log_message \
+            "Invalid firmware version configuration: $VERSION_CONFIG_FILE"
+        return 1
+    fi
+
+    firmware_version="${version_config_line#R4_FIRMWARE_VERSION=}"
+    EXPECTED_VERSION="R4_CONTROLLER_FW $firmware_version"
+}
+
 run_watchdog() {
+    if ! load_expected_version; then
+        set_state "configuration-error"
+        return 1
+    fi
+
     printf '%s\n' "$$" > "$PID_FILE"
 
     trap '
