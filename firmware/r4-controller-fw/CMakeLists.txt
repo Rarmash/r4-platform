@@ -8,7 +8,13 @@ include(pico_sdk_import.cmake)
 
 project(r4-controller-fw C CXX ASM)
 
-set(R4_FIRMWARE_VERSION "0.7.0")
+set(R4_FIRMWARE_VERSION "0.8.0")
+
+option(
+    R4_ENABLE_TEST_INPUT
+    "Enable CDC commands that inject test-only controller input"
+    OFF
+)
 
 configure_file(
     version.h.in
@@ -20,8 +26,15 @@ pico_sdk_init()
 
 add_executable(r4-controller-fw
     r4-controller-fw.c
+    rp2040_input.c
     usb_descriptors.c
     rgb_led.c
+    core/r4_controller.c
+    core/r4_display.c
+    core/r4_framebuffer_transport.c
+    core/r4_input_source.c
+    core/r4_protocol.c
+    core/r4_service_buttons.c
 )
 
 pico_generate_pio_header(
@@ -56,6 +69,12 @@ target_link_libraries(
     hardware_pio
     hardware_clocks
     tinyusb_device
+)
+
+target_compile_definitions(
+    r4-controller-fw
+    PRIVATE
+    R4_ENABLE_TEST_INPUT=$<BOOL:${R4_ENABLE_TEST_INPUT}>
 )
 
 pico_add_extra_outputs(r4-controller-fw)

@@ -1,7 +1,14 @@
 #!/bin/sh
 
-ECCTL="/userdata/system/r4/r4-ecctl"
-LOG_FILE="/userdata/system/r4/r4-achievements.log"
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-achievements.log}"
+
+to_hex() {
+    printf '%s' "$1" |
+        od -An -tx1 |
+        tr -d ' \n'
+}
 
 printf '%s ACHIEVEMENT ID=%s TITLE=%s DESCRIPTION=%s\n' \
     "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -12,5 +19,17 @@ printf '%s ACHIEVEMENT ID=%s TITLE=%s DESCRIPTION=%s\n' \
 
 # RP2040 performs the timed flash and restores the base state itself.
 "$ECCTL" LED FLASH 32 12 0 1000 >/dev/null 2>&1
+
+title_hex="$(to_hex "$2")"
+
+"$ECCTL" HOST RA ACTIVE=1 >/dev/null 2>&1 ||
+    true
+
+"$ECCTL" \
+    HOST ACHIEVEMENT \
+    "ID=$1" \
+    "TITLE_HEX=$title_hex" \
+    >/dev/null 2>&1 ||
+    true
 
 exit 0

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+
+def candidate_gamelists(rom_path: str) -> list[str]:
+    candidates: list[str] = []
+    directory = os.path.dirname(rom_path)
+
+    while directory and directory != os.path.dirname(directory):
+        candidates.append(os.path.join(directory, "gamelist.xml"))
+        if directory == "/userdata/roms":
+            break
+        directory = os.path.dirname(directory)
+
+    prefix = "/userdata/roms/"
+    if rom_path.startswith(prefix):
+        system = rom_path[len(prefix):].split("/", 1)[0]
+        candidates.append(
+            f"/userdata/system/configs/emulationstation/gamelists/"
+            f"{system}/gamelist.xml"
+        )
+
+    return list(dict.fromkeys(candidates))
+
+
+def title_from_gamelist(gamelist: str, rom_path: str) -> str | None:
+    try:
+        root = ET.parse(gamelist).getroot()
+    except (ET.ParseError, OSError):
+        return None
+
+    gamelist_directory = os.path.dirname(gamelist)
+    rom_path = os.path.normpath(os.path.abspath(rom_path))
+
+    for game in root.findall("game"):
+        listed_path = (game.findtext("path") or "").strip()
+        if not listed_path:
+            continue
+        if not os.path.isabs(listed_path):
+            listed_path = os.path.join(gamelist_directory, listed_path)
+        if os.path.normpath(os.path.abspath(listed_path)) != rom_path:
+            continue
+
+        title = (game.findtext("name") or "").strip()
+        return title or None
+
+    return None
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or not sys.argv[1]:
+        return 2
+
+    rom_path = os.path.normpath(os.path.abspath(sys.argv[1]))
+    for gamelist in candidate_gamelists(rom_path):
+        title = title_from_gamelist(gamelist, rom_path)
+        if title:
+            print(title)
+            return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

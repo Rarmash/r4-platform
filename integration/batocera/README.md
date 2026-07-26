@@ -22,36 +22,56 @@ The current implementation supports:
 - L1 and R1 shoulder buttons;
 - left and right stick clicks (L3 and R3);
 - Start and Select buttons;
-- dedicated Hotkey button;
+- R4 system button mapped as the Batocera/RetroArch Hotkey;
+- analog LT and RT axes in the `0.8.0` HID descriptor;
+- polling of queued R4 and future Capture/Trophy service events;
+- game, RetroAchievements and display-state forwarding to RP2040;
 - complete EmulationStation controller mapping;
-- standard `Hotkey + Start` emulator exit handling.
+- standard `R4 + Start` emulator exit handling.
 
 ## Components
 
 - `bin/r4-ecctl` — discovers the RP2040 CDC interface and sends service commands.
 - `bin/r4-led-state` — stores and applies the current persistent LED mode.
+- `bin/r4-game-title` — resolves a ROM path to its `<name>` in
+  EmulationStation `gamelist.xml`.
+- `bin/r4-oled-tcp` — optional framed diagnostic TCP relay for the OLED GUI.
 - `firmware-version.conf` — defines the expected RP2040 firmware version.
+- `oled-tcp.conf` — opt-in TCP bind address and port.
 - `services/R4Controller` — monitors the embedded controller and handles reconnection.
 - `scripts/R4GameState` — changes the LED state when a game starts or stops.
+- `emulationstation/game-start/R4GameMetadata` — shared `game-selected` /
+  `game-start` hook that caches and forwards the EmulationStation metadata
+  title instead of the ROM filename.
 - `emulationstation/achievements/R4Achievement` — triggers a temporary achievement flash.
 - `install.sh` — installs or updates the complete Batocera integration.
+- `tests/run-tests.sh` — shell syntax and mock service-event checks.
 
 ## Repository layout
 
 ```text
 integration/batocera/
 ├── firmware-version.conf
+├── oled-tcp.conf
 ├── bin/
 │   ├── r4-ecctl
-│   └── r4-led-state
+│   ├── r4-game-title
+│   ├── r4-led-state
+│   └── r4-oled-tcp
 ├── services/
 │   └── R4Controller
 ├── scripts/
 │   └── R4GameState
 ├── emulationstation/
-│   └── achievements/
-│       └── R4Achievement
+│   ├── achievements/
+│   │   └── R4Achievement
+│   ├── game-start/
+│   │   └── R4GameMetadata
+│   └── game-selected/
+│       └── R4GameMetadata
 ├── install.sh
+├── tests/
+│   └── run-tests.sh
 └── README.md
 ```
 
@@ -61,9 +81,14 @@ integration/batocera/
 |---|---|
 | `bin/r4-ecctl` | `/userdata/system/r4/r4-ecctl` |
 | `bin/r4-led-state` | `/userdata/system/r4/r4-led-state` |
+| `bin/r4-game-title` | `/userdata/system/r4/r4-game-title` |
+| `bin/r4-oled-tcp` | `/userdata/system/r4/r4-oled-tcp` |
 | `firmware-version.conf` | `/userdata/system/r4/firmware-version.conf` |
+| `oled-tcp.conf` | `/userdata/system/r4/oled-tcp.conf` |
 | `services/R4Controller` | `/userdata/system/services/R4Controller` |
 | `scripts/R4GameState` | `/userdata/system/scripts/R4GameState` |
+| `emulationstation/game-start/R4GameMetadata` | `/userdata/system/configs/emulationstation/scripts/game-start/R4GameMetadata` |
+| `emulationstation/game-start/R4GameMetadata` (same hook) | `/userdata/system/configs/emulationstation/scripts/game-selected/R4GameMetadata` |
 | `emulationstation/achievements/R4Achievement` | `/userdata/system/configs/emulationstation/scripts/achievements/R4Achievement` |
 
 ## Installation
@@ -103,8 +128,12 @@ All installed scripts must be executable:
 ```sh
 chmod +x /userdata/system/r4/r4-ecctl
 chmod +x /userdata/system/r4/r4-led-state
+chmod +x /userdata/system/r4/r4-game-title
+chmod +x /userdata/system/r4/r4-oled-tcp
 chmod +x /userdata/system/services/R4Controller
 chmod +x /userdata/system/scripts/R4GameState
+chmod +x /userdata/system/configs/emulationstation/scripts/game-start/R4GameMetadata
+chmod +x /userdata/system/configs/emulationstation/scripts/game-selected/R4GameMetadata
 chmod +x /userdata/system/configs/emulationstation/scripts/achievements/R4Achievement
 ```
 
@@ -150,7 +179,53 @@ The service:
 - detects USB disconnection;
 - handles USB reconnection without restarting Batocera;
 - restores the current persistent LED mode after reconnection;
+- sends the initial `HOST STATE MODE=HOME` display state;
+- sends `HOST HEARTBEAT` every two seconds so RP2040 can detect a lost host;
+- sends the current `HH:MM` clock and configured Batocera volume as
+  `HOST TELEMETRY`;
+- polls `EVENT NEXT` without mixing asynchronous events into command replies;
+- serializes helper and optional TCP-relay requests through the service so it
+  remains the only process that opens `/dev/ttyACM*`;
 - displays an amber status when the firmware version is unexpected.
+
+The two-second maintenance interval keeps the RP2040 seven-second host watchdog
+refreshed. Broker requests are checked independently at a shorter interval.
+This preserves reconnect behavior while allowing firmware to show
+`HOST LINK LOST` if the Orange Pi service disappears.
+
+## Optional OLED diagnostic TCP relay
+
+The relay is disabled by default. After installation, enable it only on a
+trusted test network:
+
+```sh
+cat >/userdata/system/r4/oled-tcp.conf <<'EOF'
+R4_OLED_TCP_ENABLED=1
+R4_OLED_TCP_BIND=0.0.0.0
+R4_OLED_TCP_PORT=4274
+EOF
+
+batocera-services restart R4Controller
+```
+
+`R4_OLED_TCP_BIND` and `R4_OLED_TCP_PORT` are configurable. An existing
+installed configuration is preserved when `install.sh` is rerun. The service
+starts the listener only when `R4_OLED_TCP_ENABLED=1`.
+
+On Windows:
+
+```powershell
+$batoceraIp = '192.168.1.123'
+./r4-oled-emulator-gui.exe --tcp "${batoceraIp}:4274"
+```
+
+Wi-Fi terminates at the Orange Pi. RP2040 stays connected to Orange Pi through
+USB CDC. The TCP child never accesses CDC directly: `R4Controller` brokers all
+commands, including GUI host-state changes and input/event polls. For a
+framebuffer request, the service opens CDC once and collects the existing
+bounded RP2040 chunks before returning one `FRAMEBUFFER FULL` TCP payload.
+Unchanged hashes return `FRAMEBUFFER UNCHANGED`. TCP framing remains one
+`REQ <id> ...` line followed by one matching `RES <id> OK|ERROR ...` line.
 
 ## LED states
 
@@ -202,6 +277,13 @@ gameStart
 ```
 
 the persistent LED mode becomes blue.
+The EmulationStation `game-selected` event provides the real metadata title and
+caches it with the selected ROM path. Its early `game-start` event immediately
+sends the cached system/title to RP2040, avoiding the several-second delay
+before Batocera's lifecycle hook. The later `gameStart` sends the same state
+again so the session timer is aligned with actual emulator launch. If no
+matching selection is cached, `<name>` is resolved from the system's
+`gamelist.xml`; a cleaned ROM label is the final fallback.
 
 When a game stops:
 
@@ -210,6 +292,7 @@ gameStop
 ```
 
 the persistent LED mode becomes green.
+The hook also sends `HOST GAME ACTION=STOP`.
 
 Game events are logged to:
 
@@ -226,6 +309,7 @@ Each event:
 - is written to the achievement log;
 - triggers a non-blocking gold LED flash;
 - leaves timing and base-color restoration to the RP2040 firmware.
+- sends RetroAchievements state and achievement title to the RP2040.
 
 Achievement events are logged to:
 
@@ -276,7 +360,7 @@ Read the current controller input:
 Example:
 
 ```text
-LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000 LT=0 RT=0 LT_STATUS=NO_SOURCE RT_STATUS=NO_SOURCE
 ```
 
 Read complete controller state:
@@ -288,8 +372,21 @@ Read complete controller state:
 Example:
 
 ```text
-FW=&lt;configured-version&gt; LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000
+FW=&lt;configured-version&gt; LED=0,16,0 BASE=0,16,0 FLASH=0 LX=0 LY=0 RX=0 RY=0 HAT=0 BUTTONS=0x00000000 LT=0 RT=0 LT_STATUS=NO_SOURCE RT_STATUS=NO_SOURCE
 ```
+
+Poll the next queued service-button event:
+
+```sh
+/userdata/system/r4/r4-ecctl EVENT NEXT
+```
+
+It returns `EVENT NONE` or a single
+`EVENT BUTTON=CAPTURE ACTION=SHORT TIME_MS=1450 SEQ=3` line. The service
+recognizes Capture, R4 and Trophy events. Screenshot capture, rolling video,
+achievement browser, R4 system panel and long/double R4 actions are explicit
+action stubs in this repository; the service logs them and does not claim those
+host features are implemented.
 
 Set a persistent LED color:
 
@@ -329,7 +426,7 @@ The configured firmware version currently exposes:
 - right stick button;
 - Start;
 - Select;
-- dedicated Hotkey.
+- R4 system button.
 
 Current HID mapping:
 
@@ -340,6 +437,8 @@ Current HID mapping:
 | Left stick Y | `Y` |
 | Right stick X | `Rx` |
 | Right stick Y | `Ry` |
+| LT | `Z` axis |
+| RT | `Rz` axis |
 | A | `BtnA` |
 | B | `BtnB` |
 | X | `BtnX` |
@@ -348,11 +447,13 @@ Current HID mapping:
 | R1 | `BtnTR` |
 | Select | `BtnSelect` |
 | Start | `BtnStart` |
-| Hotkey | `BtnMode` |
+| R4 system button | `BtnMode` / Hotkey Enable |
 | Left stick click (L3) | `BtnThumbL` |
 | Right stick click (R3) | `BtnThumbR` |
 
-The generic TinyUSB gamepad report also exposes unused `Z` and `Rz` axes. They remain centered at zero.
+The `0.8.0` descriptor uses the former Z and Rz slots for unsigned analog
+LT and RT. The production firmware reports them released until a verified
+external ADC backend is added.
 
 ## D-pad values
 
@@ -389,7 +490,7 @@ The current CDC button masks are:
 | R1 | `0x00000080` |
 | Select | `0x00000400` |
 | Start | `0x00000800` |
-| Hotkey | `0x00001000` |
+| R4 system button | `0x00001000` |
 | Left stick click (L3) | `0x00002000` |
 | Right stick click (R3) | `0x00004000` |
 
@@ -414,10 +515,10 @@ The current joystick layout is:
 ```text
 Axis 0: left stick X
 Axis 1: left stick Y
-Axis 2: unused Z
+Axis 2: LT (Z)
 Axis 3: right stick X
 Axis 4: right stick Y
-Axis 5: unused Rz
+Axis 5: RT (Rz)
 Axis 6: Hat0X
 Axis 7: Hat0Y
 ```
@@ -433,7 +534,7 @@ Button 6: L1
 Button 7: R1
 Button 10: Select
 Button 11: Start
-Button 12: Hotkey
+Button 12: R4 (BtnMode / Hotkey Enable)
 Button 13: left stick click (L3 / BtnThumbL)
 Button 14: right stick click (R3 / BtnThumbR)
 ```
@@ -452,7 +553,7 @@ The controller is detected as:
 Rarmash R4 Controller
 ```
 
-The physical Hotkey button is mapped to:
+The physical R4 system button is exposed as `BtnMode` and mapped to:
 
 ```text
 Hotkey Enable
@@ -461,10 +562,62 @@ Hotkey Enable
 The standard emulator exit combination is:
 
 ```text
-Hotkey + Start
+R4 + Start
 ```
 
-Analog L2 and R2 are not implemented yet and should be skipped during controller configuration.
+After upgrading from `0.7.0`, Batocera may request a new controller mapping
+because the HID descriptor changed. Map LT and RT as analog axes, then verify
+ABXY, D-pad, both sticks, L1/R1, stick switches, Select, Start, R4 and
+`R4 + Start`. The physical LT/RT ADC is not implemented yet, so a
+test-enabled firmware image is needed to move those axes.
+
+## Safe service-event testing
+
+Test-event injection is disabled unless explicitly opted in:
+
+```sh
+R4_ENABLE_TEST_EVENTS=1 \
+  /userdata/system/services/R4Controller test-event CAPTURE SHORT
+```
+
+Valid buttons are `CAPTURE`, `R4`, `TROPHY`; valid actions are `PRESS`,
+`RELEASE`, `SHORT`, `LONG`, `DOUBLE`. The command exercises service dispatch
+only and does not inject HID input. Without `R4_ENABLE_TEST_EVENTS=1` it fails.
+
+R4 is not separate from the Hotkey input: GP10 supplies the existing `BtnMode`
+bit and the R4 gesture recognizer. A short standalone R4 is reserved for the
+future system panel. If Start, another digital button or a D-pad direction is
+pressed while R4 is held, firmware cancels the pending standalone action while
+leaving both HID inputs visible. This preserves `R4 + Start` and other
+RetroArch system combinations. Long and double presses remain distinct and use
+the firmware's configurable timing thresholds.
+
+Run repository-side shell and mock checks on a POSIX host:
+
+```sh
+sh integration/batocera/tests/run-tests.sh
+```
+
+## Batocera 40 verification checklist
+
+This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
+
+1. Install the integration and confirm `R4Controller status` becomes `online`.
+2. Check `PING`, `VERSION`, `INPUT`, `STATUS` and the configured
+   `0.8.0` version.
+3. Unplug/replug and reset the RP2040; confirm rediscovery, one service instance,
+   restored LED state and no repetitive log flood.
+4. Remap the changed descriptor; verify all old controls and
+   `R4 + Start`, plus the other configured `R4 + button` combinations.
+5. With a test-enabled firmware, inject LT/RT at 0, midpoint and 65535; confirm
+   independent Z/Rz axes in `jstest`, EmulationStation and RetroArch.
+6. Start/stop a game and confirm LED state plus `HOST GAME` acknowledgements.
+7. Trigger a real RetroAchievement and confirm the existing gold flash/log plus
+   the OLED-state message.
+8. Inject every service button/action and confirm one bounded log action per
+   event; do not expect the documented stubs to perform screenshots or panels.
+9. Inspect malformed/unknown CDC commands and a line over 255 bytes; confirm a
+   bounded `ERR` response and continued reconnect/service operation.
 
 ## Supported firmware
 
@@ -512,13 +665,12 @@ Runtime files and logs are not part of the repository.
 
 The current prototype does not yet include:
 
-- analog L2 and R2;
+- a physical ADC source or calibrated hardware for analog LT and RT;
 - Home;
 - Capture;
-- R4;
 - Trophy;
 - vibration;
-- the secondary display;
+- a selected OLED model, resolution or physical display driver;
 - battery and power telemetry.
 
 All four external RP2040 ADC channels are already occupied by the two analog sticks.
@@ -526,3 +678,9 @@ All four external RP2040 ADC channels are already occupied by the two analog sti
 Additional analog inputs will require an external ADC or another analog input solution.
 
 Additional digital controls should use a GPIO expander, button matrix or another bus-based expansion solution.
+
+The remaining hardware work is concrete: select and electrically validate an
+external ADC, record independent LT/RT calibration values, select and verify a
+GPIO expander for Home/Capture/Trophy, assign/debounce those real button inputs, select
+the OLED model and bus/address, implement its framebuffer backend, and validate
+battery/power/temperature sensors on the final power design.

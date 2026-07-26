@@ -1,7 +1,12 @@
 #!/bin/sh
 
-LED_STATE="/userdata/system/r4/r4-led-state"
-LOG_FILE="/userdata/system/r4/r4-game-events.log"
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
+LED_STATE="${R4_LED_STATE:-$R4_DATA_DIR/r4-led-state}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+TITLE_LOOKUP="${R4_TITLE_LOOKUP:-$R4_DATA_DIR/r4-game-title}"
+LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-game-events.log}"
+METADATA_CACHE="$R4_RUNTIME_DIR/r4-game-metadata"
 
 event="$1"
 system_name="$2"
@@ -20,15 +25,78 @@ log_event() {
         >> "$LOG_FILE"
 }
 
+to_hex() {
+    printf '%s' "$1" |
+        od -An -tx1 |
+        tr -d ' \n'
+}
+
+fallback_game_title() {
+    title="$(basename "$1")"
+    title="${title%.*}"
+    normalize_title "$title"
+}
+
+normalize_title() {
+    printf '%s' "$1" |
+        tr '\r\n' '  ' |
+        sed 's/[[:space:]]*[(][^()]*[)][[:space:]]*$//' |
+        LC_ALL=C cut -c 1-47
+}
+
+game_title_hex() {
+    expected_rom_hex="$(to_hex "$rom_path")"
+    cached_rom_hex=""
+    cached_title_hex=""
+
+    if [ -f "$METADATA_CACHE" ]; then
+        cached_rom_hex="$(
+            sed -n 's/^ROM_HEX=//p' "$METADATA_CACHE" |
+                head -n 1
+        )"
+        cached_title_hex="$(
+            sed -n 's/^TITLE_HEX=//p' "$METADATA_CACHE" |
+                head -n 1
+        )"
+    fi
+
+    if [ "$cached_rom_hex" = "$expected_rom_hex" ] &&
+       [ -n "$cached_title_hex" ]; then
+        printf '%s\n' "$cached_title_hex"
+        return
+    fi
+
+    title=""
+    if [ -x "$TITLE_LOOKUP" ]; then
+        title="$("$TITLE_LOOKUP" "$rom_path" 2>/dev/null)" ||
+            title=""
+    fi
+    [ -n "$title" ] || title="$(fallback_game_title "$rom_path")"
+    title="$(normalize_title "$title")"
+    [ -n "$title" ] || title="UNKNOWN GAME"
+    to_hex "$title"
+}
+
 case "$event" in
     gameStart)
         log_event
         "$LED_STATE" set playing >/dev/null 2>&1
+
+        "$ECCTL" \
+            HOST GAME ACTION=START \
+            "SYSTEM_HEX=$(to_hex "$system_name")" \
+            "GAME_HEX=$(game_title_hex)" \
+            >/dev/null 2>&1 ||
+            true
         ;;
 
     gameStop)
         log_event
         "$LED_STATE" set ready >/dev/null 2>&1
+        "$ECCTL" HOST GAME ACTION=STOP \
+            >/dev/null 2>&1 ||
+            true
+        rm -f "$METADATA_CACHE"
         ;;
 esac
 

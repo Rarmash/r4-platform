@@ -1,0 +1,176 @@
+#!/bin/sh
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+MAX_WIRE_LINE=640
+MAX_FRAMEBUFFER_RESPONSE=2304
+handler_pid=""
+listener_pid=""
+client_to_server=""
+server_to_client=""
+
+cleanup_listener() {
+    [ -n "$listener_pid" ] &&
+        kill "$listener_pid" 2>/dev/null ||
+        true
+    [ -n "$handler_pid" ] &&
+        kill "$handler_pid" 2>/dev/null ||
+        true
+    [ -n "$listener_pid" ] &&
+        wait "$listener_pid" 2>/dev/null ||
+        true
+    [ -n "$handler_pid" ] &&
+        wait "$handler_pid" 2>/dev/null ||
+        true
+
+    exec 5>&-
+    exec 6>&-
+    rm -f "$client_to_server" "$server_to_client"
+    listener_pid=""
+    handler_pid=""
+}
+
+send_error() {
+    request_id="$1"
+    shift
+    printf 'RES %s ERROR %s\n' "$request_id" "$*"
+}
+
+serve_stream() {
+    while IFS= read -r request_line; do
+        line_length="$(printf '%s' "$request_line" | wc -c)"
+
+        if [ "$line_length" -lt 7 ] ||
+           [ "$line_length" -gt "$MAX_WIRE_LINE" ]; then
+            send_error 0 BAD_FRAME
+            continue
+        fi
+
+        request_kind="${request_line%% *}"
+        request_rest="${request_line#* }"
+        request_id="${request_rest%% *}"
+        request_command="${request_rest#* }"
+
+        case "$request_id" in
+            ''|*[!0-9]*)
+                send_error 0 BAD_REQUEST_ID
+                continue
+                ;;
+        esac
+
+        if [ "$request_kind" != "REQ" ] ||
+           [ "$request_command" = "$request_rest" ]; then
+            send_error "$request_id" BAD_FRAME
+            continue
+        fi
+
+        command_length="$(
+            printf '%s' "$request_command" |
+                wc -c
+        )"
+
+        if [ "$command_length" -lt 1 ] ||
+           [ "$command_length" -gt 255 ]; then
+            send_error "$request_id" BAD_COMMAND_LENGTH
+            continue
+        fi
+
+        response="$("$ECCTL" "$request_command" 2>&1)"
+        command_status=$?
+        response="$(
+            printf '%s' "$response" |
+                tr '\r\n' '  ' |
+                LC_ALL=C tr -cd '\040-\176' |
+                sed 's/[ ][ ]*/ /g; s/^ //; s/ $//'
+        )"
+        response_length="$(printf '%s' "$response" | wc -c)"
+
+        if [ "$command_status" -eq 0 ]; then
+            response_limit=255
+
+            case "$response" in
+                "FRAMEBUFFER FULL "*)
+                    response_limit="$MAX_FRAMEBUFFER_RESPONSE"
+                    ;;
+            esac
+
+            if [ "$response_length" -lt 1 ] ||
+               [ "$response_length" -gt "$response_limit" ]; then
+                send_error "$request_id" BAD_CDC_RESPONSE
+            else
+                printf 'RES %s OK %s\n' \
+                    "$request_id" \
+                    "$response"
+            fi
+        else
+            send_error \
+                "$request_id" \
+                "$(printf '%.500s' "${response:-RP2040_UNAVAILABLE}")"
+        fi
+    done
+}
+
+listen_forever() {
+    bind_address="$1"
+    port="$2"
+    nc_command="${R4_OLED_TCP_NC:-nc}"
+
+    command -v "$nc_command" >/dev/null 2>&1 || {
+        echo "TCP relay requires nc (netcat)" >&2
+        return 1
+    }
+
+    trap 'cleanup_listener; exit 0' 1 2 15
+
+    while true; do
+        pipe_root="${R4_RUNTIME_DIR:-/tmp}/r4-oled-tcp-$$"
+        client_to_server="$pipe_root.in"
+        server_to_client="$pipe_root.out"
+
+        rm -f "$client_to_server" "$server_to_client"
+        mkfifo "$client_to_server" "$server_to_client" || return 1
+
+        exec 5<> "$client_to_server"
+        exec 6<> "$server_to_client"
+
+        serve_stream \
+            < "$client_to_server" \
+            > "$server_to_client" \
+            5>&- \
+            6>&- &
+        handler_pid=$!
+
+        "$nc_command" \
+            -l \
+            -s "$bind_address" \
+            -p "$port" \
+            < "$server_to_client" \
+            > "$client_to_server" \
+            5>&- \
+            6>&- &
+        listener_pid=$!
+        wait "$listener_pid" 2>/dev/null || true
+
+        cleanup_listener
+        sleep 0.2
+    done
+}
+
+case "$1" in
+    --stdio)
+        serve_stream
+        ;;
+
+    --listen)
+        [ "$#" -eq 3 ] || {
+            echo "Usage: $0 --listen <bind-address> <port>" >&2
+            exit 1
+        }
+        listen_forever "$2" "$3"
+        ;;
+
+    *)
+        echo "Usage: $0 {--stdio|--listen <bind-address> <port>}" >&2
+        exit 1
+        ;;
+esac

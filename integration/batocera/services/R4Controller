@@ -1,14 +1,24 @@
 #!/bin/sh
 
-ECCTL="/userdata/system/r4/r4-ecctl"
-LED_STATE="/userdata/system/r4/r4-led-state"
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
 
-PID_FILE="/tmp/r4-controller-service.pid"
-STATE_FILE="/tmp/r4-controller-service.state"
-LOG_FILE="/userdata/system/r4/r4-controller.log"
-VERSION_CONFIG_FILE="/userdata/system/r4/firmware-version.conf"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+LED_STATE="${R4_LED_STATE:-$R4_DATA_DIR/r4-led-state}"
+OLED_TCP="${R4_OLED_TCP:-$R4_DATA_DIR/r4-oled-tcp}"
+
+PID_FILE="$R4_RUNTIME_DIR/r4-controller-service.pid"
+STATE_FILE="$R4_RUNTIME_DIR/r4-controller-service.state"
+REQUEST_DIR="$R4_RUNTIME_DIR/r4-controller-requests"
+RESPONSE_DIR="$R4_RUNTIME_DIR/r4-controller-responses"
+OLED_TCP_PID_FILE="$R4_RUNTIME_DIR/r4-oled-tcp.pid"
+LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-controller.log}"
+VERSION_CONFIG_FILE="$R4_DATA_DIR/firmware-version.conf"
+OLED_TCP_CONFIG_FILE="$R4_DATA_DIR/oled-tcp.conf"
 
 CHECK_INTERVAL=2
+BROKER_POLL_INTERVAL=0.05
+R4_ENABLE_TEST_EVENTS="${R4_ENABLE_TEST_EVENTS:-0}"
 
 log_message() {
     printf '%s %s\n' \
@@ -56,7 +66,7 @@ load_expected_version() {
 
     if [ "$version_config_line_count" -ne 1 ] 2>/dev/null ||
        ! printf '%s\n' "$version_config_line" |
-           grep -Eq '^R4_FIRMWARE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'; then
+           grep -Eq '^R4_FIRMWARE_VERSION=[0-9]+\.[0-9]+\.[0-9]+(-dev)?$'; then
         log_message \
             "Invalid firmware version configuration: $VERSION_CONFIG_FILE"
         return 1
@@ -66,70 +76,440 @@ load_expected_version() {
     EXPECTED_VERSION="R4_CONTROLLER_FW $firmware_version"
 }
 
+controller_command() {
+    R4_ECCTL_DIRECT=1 "$ECCTL" "$@"
+}
+
+controller_framebuffer() {
+    R4_ECCTL_DIRECT=1 "$ECCTL" --framebuffer "$@"
+}
+
+to_hex() {
+    printf '%s' "$1" |
+        od -An -tx1 |
+        tr -d ' \n'
+}
+
+read_system_volume() {
+    volume="NA"
+
+    if command -v batocera-settings-get >/dev/null 2>&1; then
+        configured_volume="$(
+            batocera-settings-get audio.volume 2>/dev/null
+        )" ||
+            configured_volume=""
+
+        case "$configured_volume" in
+            ''|*[!0-9]*)
+                ;;
+            *)
+                if [ "$configured_volume" -le 100 ]; then
+                    volume="$configured_volume"
+                fi
+                ;;
+        esac
+    fi
+
+    printf '%s\n' "$volume"
+}
+
+send_host_telemetry() {
+    current_clock="$(date '+%H:%M')"
+    system_volume="$(read_system_volume)"
+
+    controller_command \
+        HOST TELEMETRY \
+        "TIME_HEX=$(to_hex "$current_clock")" \
+        "VOLUME=$system_volume" \
+        >/dev/null 2>&1 ||
+        true
+}
+
+process_broker_requests() {
+    for request_file in "$REQUEST_DIR"/request.*; do
+        [ -f "$request_file" ] || continue
+
+        request_name="${request_file##*/}"
+        request_id="${request_name#request.}"
+
+        case "$request_id" in
+            ''|*[!0-9]*)
+                rm -f "$request_file"
+                continue
+                ;;
+        esac
+
+        command_line="$(sed -n '1p' "$request_file")"
+        command_length="$(printf '%s' "$command_line" | wc -c)"
+        response_temp="$RESPONSE_DIR/.response.$request_id"
+        response_file="$RESPONSE_DIR/response.$request_id"
+
+        if [ "$command_length" -lt 1 ] ||
+           [ "$command_length" -gt 255 ]; then
+            command_status=1
+            command_response="Invalid broker command length"
+        else
+            case "$command_line" in
+                "FRAMEBUFFER READ")
+                    command_response="$(
+                        controller_framebuffer 2>&1
+                    )"
+                    command_status=$?
+                    ;;
+                "FRAMEBUFFER READ HASH="*)
+                    previous_hash="${command_line##* HASH=}"
+
+                    if printf '%s\n' "$previous_hash" |
+                       grep -Eq '^[0-9A-Fa-f]{8}$'; then
+                        command_response="$(
+                            controller_framebuffer \
+                                "$previous_hash" \
+                                2>&1
+                        )"
+                        command_status=$?
+                    else
+                        command_status=1
+                        command_response="Invalid framebuffer hash"
+                    fi
+                    ;;
+                *)
+                    command_response="$(
+                        controller_command "$command_line" 2>&1
+                    )"
+                    command_status=$?
+                    ;;
+            esac
+        fi
+
+        command_response="$(
+            printf '%s' "$command_response" |
+                tr '\r\n' '  ' |
+                sed 's/[ ][ ]*/ /g; s/^ //; s/ $//'
+        )"
+
+        if [ "$command_status" -eq 0 ]; then
+            response_status="OK"
+        else
+            response_status="ERROR"
+        fi
+
+        {
+            printf '%s\n' "$response_status"
+            printf '%s\n' "$command_response"
+        } > "$response_temp" &&
+            mv "$response_temp" "$response_file"
+
+        rm -f "$request_file"
+    done
+}
+
+load_oled_tcp_config() {
+    R4_OLED_TCP_ENABLED=0
+    R4_OLED_TCP_BIND=127.0.0.1
+    R4_OLED_TCP_PORT=4274
+
+    if [ -f "$OLED_TCP_CONFIG_FILE" ]; then
+        # This is an administrator-owned shell configuration file.
+        . "$OLED_TCP_CONFIG_FILE"
+    fi
+
+    case "$R4_OLED_TCP_ENABLED" in
+        0|1)
+            ;;
+        *)
+            log_message \
+                "Invalid R4_OLED_TCP_ENABLED in $OLED_TCP_CONFIG_FILE"
+            return 1
+            ;;
+    esac
+
+    case "$R4_OLED_TCP_PORT" in
+        ''|*[!0-9]*)
+            log_message \
+                "Invalid R4_OLED_TCP_PORT in $OLED_TCP_CONFIG_FILE"
+            return 1
+            ;;
+    esac
+
+    if [ "$R4_OLED_TCP_PORT" -lt 1 ] ||
+       [ "$R4_OLED_TCP_PORT" -gt 65535 ]; then
+        log_message \
+            "R4_OLED_TCP_PORT is outside 1..65535"
+        return 1
+    fi
+
+    if [ -z "$R4_OLED_TCP_BIND" ] ||
+       printf '%s' "$R4_OLED_TCP_BIND" |
+           grep -q '[^A-Za-z0-9:._-]'; then
+        log_message \
+            "Invalid R4_OLED_TCP_BIND in $OLED_TCP_CONFIG_FILE"
+        return 1
+    fi
+}
+
+start_oled_tcp() {
+    load_oled_tcp_config || return 1
+
+    [ "$R4_OLED_TCP_ENABLED" = "1" ] || {
+        log_message "OLED TCP diagnostics are disabled"
+        return 0
+    }
+
+    [ -x "$OLED_TCP" ] || {
+        log_message "OLED TCP relay is missing: $OLED_TCP"
+        return 1
+    }
+
+    R4_DATA_DIR="$R4_DATA_DIR" \
+    R4_RUNTIME_DIR="$R4_RUNTIME_DIR" \
+    R4_ECCTL="$ECCTL" \
+        "$OLED_TCP" \
+        --listen \
+        "$R4_OLED_TCP_BIND" \
+        "$R4_OLED_TCP_PORT" \
+        >> "$LOG_FILE" 2>&1 &
+
+    oled_tcp_pid=$!
+    printf '%s\n' "$oled_tcp_pid" > "$OLED_TCP_PID_FILE"
+    log_message \
+        "OLED TCP diagnostics listening on $R4_OLED_TCP_BIND:$R4_OLED_TCP_PORT"
+}
+
+stop_oled_tcp() {
+    if [ -f "$OLED_TCP_PID_FILE" ]; then
+        oled_tcp_pid="$(cat "$OLED_TCP_PID_FILE" 2>/dev/null)"
+
+        if [ -n "$oled_tcp_pid" ]; then
+            kill "$oled_tcp_pid" 2>/dev/null || true
+        fi
+    fi
+
+    rm -f "$OLED_TCP_PID_FILE"
+}
+
+event_field() {
+    printf '%s\n' "$1" |
+        tr ' ' '\n' |
+        sed -n "s/^$2=//p" |
+        head -n 1
+}
+
+dispatch_controller_event() {
+    event_line="$1"
+
+    case "$event_line" in
+        "EVENT NONE")
+            return 0
+            ;;
+
+        "EVENT "*)
+            ;;
+
+        *)
+            log_message \
+                "Ignored malformed controller event: $event_line"
+            return 1
+            ;;
+    esac
+
+    event_button="$(event_field "$event_line" BUTTON)"
+    event_action="$(event_field "$event_line" ACTION)"
+    event_sequence="$(event_field "$event_line" SEQ)"
+
+    case "$event_button:$event_action" in
+        CAPTURE:SHORT)
+            log_message \
+                "Capture short event seq=$event_sequence: screenshot action is not wired yet"
+            ;;
+
+        CAPTURE:LONG)
+            log_message \
+                "Capture long event seq=$event_sequence: recording action stub"
+            ;;
+
+        TROPHY:SHORT)
+            log_message \
+                "Trophy short event seq=$event_sequence: achievements view action stub"
+            ;;
+
+        TROPHY:LONG)
+            log_message \
+                "Trophy long event seq=$event_sequence: RetroAchievements status action stub"
+            ;;
+
+        R4:SHORT)
+            log_message \
+                "R4 short event seq=$event_sequence: system panel action stub"
+            ;;
+
+        R4:LONG)
+            log_message \
+                "R4 long event seq=$event_sequence: long-press action stub"
+            ;;
+
+        *:PRESS|*:RELEASE|*:DOUBLE)
+            log_message \
+                "Controller event button=$event_button action=$event_action seq=$event_sequence"
+            ;;
+
+        *)
+            log_message \
+                "Ignored unknown controller event: $event_line"
+            return 1
+            ;;
+    esac
+}
+
+poll_controller_event() {
+    event_response="$(controller_command EVENT NEXT 2>/dev/null)" ||
+        return 0
+
+    dispatch_controller_event "$event_response" ||
+        true
+}
+
+inject_test_event() {
+    if [ "$R4_ENABLE_TEST_EVENTS" != "1" ]; then
+        echo \
+            "Test events are disabled; set R4_ENABLE_TEST_EVENTS=1 explicitly" \
+            >&2
+        return 1
+    fi
+
+    test_button="$1"
+    test_action="$2"
+
+    case "$test_button" in
+        CAPTURE|R4|TROPHY)
+            ;;
+        *)
+            echo "Unknown test button: $test_button" >&2
+            return 1
+            ;;
+    esac
+
+    case "$test_action" in
+        PRESS|RELEASE|SHORT|LONG|DOUBLE)
+            ;;
+        *)
+            echo "Unknown test action: $test_action" >&2
+            return 1
+            ;;
+    esac
+
+    dispatch_controller_event \
+        "EVENT BUTTON=$test_button ACTION=$test_action TIME_MS=0 SEQ=TEST"
+}
+
 run_watchdog() {
     if ! load_expected_version; then
         set_state "configuration-error"
         return 1
     fi
 
+    mkdir -p "$REQUEST_DIR" "$RESPONSE_DIR" || {
+        set_state "runtime-error"
+        return 1
+    }
+    rm -f \
+        "$REQUEST_DIR"/request.* \
+        "$REQUEST_DIR"/.request.* \
+        "$RESPONSE_DIR"/response.* \
+        "$RESPONSE_DIR"/.response.*
+
     printf '%s\n' "$$" > "$PID_FILE"
 
     trap '
+        stop_oled_tcp
         rm -f "$PID_FILE"
         set_state "stopped"
         exit 0
     ' 1 2 15
 
     previous_state=""
+    next_check=0
 
     log_message "Watchdog started with PID $$"
+    start_oled_tcp || true
 
     while true; do
-        ping_response="$("$ECCTL" PING 2>/dev/null)"
+        process_broker_requests
+        current_time="$(date +%s)"
 
-        if [ "$ping_response" = "PONG" ]; then
-            version_response="$("$ECCTL" VERSION 2>/dev/null)"
+        if [ "$current_time" -ge "$next_check" ]; then
+            next_check=$((current_time + CHECK_INTERVAL))
+            ping_response="$(controller_command PING 2>/dev/null)"
 
-            if [ "$version_response" = "$EXPECTED_VERSION" ]; then
-                current_state="online"
-            else
-                current_state="version-mismatch"
-            fi
-        else
-            version_response=""
-            current_state="offline"
-        fi
+            if [ "$ping_response" = "PONG" ]; then
+                version_response="$(controller_command VERSION 2>/dev/null)"
 
-        set_state "$current_state"
+                if [ "$version_response" = "$EXPECTED_VERSION" ]; then
+                    heartbeat_response="$(
+                        controller_command HOST HEARTBEAT 2>/dev/null
+                    )"
 
-        if [ "$current_state" != "$previous_state" ]; then
-            case "$current_state" in
-                online)
-                    log_message \
-                        "Controller connected: $version_response"
-
-                    if [ -x "$LED_STATE" ]; then
-                        "$LED_STATE" apply >/dev/null 2>&1
+                    if [ "$heartbeat_response" = "OK HOST HEARTBEAT" ]; then
+                        current_state="online"
+                        send_host_telemetry
                     else
-                        "$ECCTL" LED 0 16 0 >/dev/null 2>&1
+                        current_state="heartbeat-error"
                     fi
-                    ;;
+                else
+                    current_state="version-mismatch"
+                fi
+            else
+                version_response=""
+                current_state="offline"
+            fi
 
-                version-mismatch)
-                    log_message \
-                        "Firmware mismatch: expected '$EXPECTED_VERSION', got '$version_response'"
+            set_state "$current_state"
 
-                    "$ECCTL" LED 16 8 0 >/dev/null 2>&1
-                    ;;
+            if [ "$current_state" != "$previous_state" ]; then
+                case "$current_state" in
+                    online)
+                        log_message \
+                            "Controller connected: $version_response"
 
-                offline)
-                    log_message "Controller disconnected"
-                    ;;
-            esac
+                        controller_command HOST STATE MODE=HOME \
+                            >/dev/null 2>&1 ||
+                            true
+
+                        if [ -x "$LED_STATE" ]; then
+                            R4_ECCTL_DIRECT=1 \
+                                "$LED_STATE" apply >/dev/null 2>&1
+                        else
+                            controller_command LED 0 16 0 >/dev/null 2>&1
+                        fi
+                        ;;
+
+                    version-mismatch)
+                        log_message \
+                            "Firmware mismatch: expected '$EXPECTED_VERSION', got '$version_response'"
+
+                        controller_command LED 16 8 0 >/dev/null 2>&1
+                        ;;
+
+                    heartbeat-error)
+                        log_message \
+                            "Controller rejected host heartbeat: $heartbeat_response"
+
+                        controller_command LED 16 0 0 >/dev/null 2>&1
+                        ;;
+
+                    offline)
+                        log_message "Controller disconnected"
+                        ;;
+                esac
+            fi
+
+            if [ "$current_state" = "online" ]; then
+                poll_controller_event
+            fi
+
+            previous_state="$current_state"
         fi
 
-        previous_state="$current_state"
-        sleep "$CHECK_INTERVAL"
+        sleep "$BROKER_POLL_INTERVAL"
     done
 }
 
@@ -233,8 +613,21 @@ case "$1" in
         run_watchdog
         ;;
 
+    test-event)
+        [ "$#" -eq 3 ] || {
+            echo \
+                "Usage: R4_ENABLE_TEST_EVENTS=1 $0 test-event <CAPTURE|R4|TROPHY> <PRESS|RELEASE|SHORT|LONG|DOUBLE>" \
+                >&2
+            exit 1
+        }
+
+        inject_test_event "$2" "$3"
+        ;;
+
     *)
-        echo "Usage: $0 {start|stop|restart|status}" >&2
+        echo \
+            "Usage: $0 {start|stop|restart|status|test-event}" \
+            >&2
         exit 1
         ;;
 esac

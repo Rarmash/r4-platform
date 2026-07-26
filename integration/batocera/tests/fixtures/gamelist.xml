@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>./Quake II (USA).cue</path>
+    <name>Quake II</name>
+  </game>
+  <game>
+    <path>./Classic NES Series - Super Mario Bros. (USA, Europe).gba</path>
+    <name>Classic NES Series - Super Mario Bros.</name>
+  </game>
+</gameList>

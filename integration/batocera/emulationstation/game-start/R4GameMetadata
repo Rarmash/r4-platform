@@ -1,0 +1,121 @@
+#!/bin/sh
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
+TITLE_LOOKUP="${R4_TITLE_LOOKUP:-$R4_DATA_DIR/r4-game-title}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-game-events.log}"
+CACHE_FILE="$R4_RUNTIME_DIR/r4-game-metadata"
+
+event_directory="${0%/*}"
+event_name="${R4_ES_EVENT:-${event_directory##*/}}"
+
+to_hex() {
+    printf '%s' "$1" |
+        od -An -tx1 |
+        tr -d ' \n'
+}
+
+read_cache_field() {
+    sed -n "s/^$1=//p" "$CACHE_FILE" 2>/dev/null |
+        head -n 1
+}
+
+resolve_title() {
+    resolved_title=""
+
+    if [ -x "$TITLE_LOOKUP" ]; then
+        resolved_title="$("$TITLE_LOOKUP" "$rom_path" 2>/dev/null)" ||
+            resolved_title=""
+    fi
+
+    if [ -z "$resolved_title" ]; then
+        resolved_title="${rom_label:-$(basename "$rom_path")}"
+        resolved_title="${resolved_title%.*}"
+    fi
+
+    resolved_title="$(normalize_title "$resolved_title")"
+    [ -n "$resolved_title" ] ||
+        resolved_title="UNKNOWN GAME"
+    printf '%s' "$resolved_title"
+}
+
+normalize_title() {
+    printf '%s' "$1" |
+        tr '\r\n' '  ' |
+        sed 's/[[:space:]]*[(][^()]*[)][[:space:]]*$//' |
+        LC_ALL=C cut -c 1-47
+}
+
+write_cache() {
+    cache_temp="$CACHE_FILE.$$"
+    cache_title="$(
+        printf '%s' "$game_title" |
+            tr '\r\n' '  '
+    )"
+    {
+        printf 'ROM_HEX=%s\n' "$(to_hex "$rom_path")"
+        printf 'SYSTEM_HEX=%s\n' "$(to_hex "$system_name")"
+        printf 'TITLE_HEX=%s\n' "$(to_hex "$game_title")"
+        printf 'TITLE_TEXT=%s\n' "$cache_title"
+    } > "$cache_temp" &&
+        mv "$cache_temp" "$CACHE_FILE"
+}
+
+case "$event_name" in
+    game-selected)
+        system_name="$1"
+        rom_path="$2"
+        game_title="$3"
+        [ -n "$game_title" ] ||
+            game_title="$(resolve_title)"
+        game_title="$(normalize_title "$game_title")"
+        [ -n "$game_title" ] ||
+            game_title="UNKNOWN GAME"
+        write_cache
+        ;;
+
+    game-start)
+        rom_path="$1"
+        rom_label="$2"
+        rom_hex="$(to_hex "$rom_path")"
+        cached_rom_hex="$(read_cache_field ROM_HEX)"
+
+        if [ "$cached_rom_hex" = "$rom_hex" ]; then
+            system_hex="$(read_cache_field SYSTEM_HEX)"
+            title_hex="$(read_cache_field TITLE_HEX)"
+            system_name=""
+            game_title=""
+        else
+            rom_relative="${rom_path#/userdata/roms/}"
+            system_name="${rom_relative%%/*}"
+            [ "$system_name" != "$rom_relative" ] ||
+                system_name="UNKNOWN"
+            game_title="$(resolve_title)"
+            write_cache
+            system_hex="$(to_hex "$system_name")"
+            title_hex="$(to_hex "$game_title")"
+        fi
+
+        if [ -n "$system_hex" ] &&
+           [ -n "$title_hex" ]; then
+            "$ECCTL" \
+                HOST GAME ACTION=START \
+                "SYSTEM_HEX=$system_hex" \
+                "GAME_HEX=$title_hex" \
+                >/dev/null 2>&1 ||
+                true
+        fi
+        ;;
+
+    *)
+        exit 0
+        ;;
+esac
+
+printf '%s METADATA EVENT=%s ROM=%s TITLE=%s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" \
+    "$event_name" \
+    "$rom_path" \
+    "$(read_cache_field TITLE_TEXT)" \
+    >> "$LOG_FILE"
