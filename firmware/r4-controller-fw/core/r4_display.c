@@ -464,7 +464,7 @@ static void render_status_bar(
 
     draw_text(
         framebuffer,
-        38,
+        48,
         1,
         model->external_power ? "EXT" : "BAT",
         1,
@@ -482,7 +482,7 @@ static void render_status_bar(
         );
     }
 
-    draw_text(framebuffer, 63, 1, battery, 1, 4);
+    draw_text(framebuffer, 70, 1, battery, 1, 4);
 
     char runtime[8] = "--";
 
@@ -512,17 +512,64 @@ static void render_status_bar(
         }
     }
 
-    draw_text(framebuffer, 99, 1, runtime, 1, 5);
+    draw_text(framebuffer, 100, 1, runtime, 1, 5);
 
     for (int x = 0; x < framebuffer->width; ++x) {
         set_pixel(framebuffer, x, 9, true);
     }
 }
 
-static void render_footer(
+static void render_card_indicator(
     const r4_display_model_t *model,
     r4_framebuffer_t *framebuffer,
-    bool game_screen
+    int x,
+    int y
+) {
+    const char *label = "--";
+
+    draw_rect(framebuffer, x, y, 9, 8, false);
+    set_pixel(framebuffer, x, y, false);
+    set_pixel(framebuffer, x + 8, y, false);
+
+    if (!model->card_present) {
+        for (int marker_x = 2; marker_x <= 6; ++marker_x) {
+            set_pixel(framebuffer, x + marker_x, y + 4, true);
+        }
+    } else if (strcmp(model->card_state, "READY") == 0) {
+        label = "OK";
+        draw_rect(framebuffer, x + 2, y + 2, 5, 4, true);
+    } else if (strcmp(model->card_state, "BUSY") == 0) {
+        label = "BZ";
+        set_pixel(framebuffer, x + 2, y + 2, true);
+        set_pixel(framebuffer, x + 6, y + 2, true);
+        set_pixel(framebuffer, x + 2, y + 5, true);
+        set_pixel(framebuffer, x + 6, y + 5, true);
+    } else if (strcmp(model->card_state, "EJECTED") == 0) {
+        label = "EJ";
+        for (int marker_y = 2; marker_y <= 5; ++marker_y) {
+            set_pixel(framebuffer, x + 4, y + marker_y, true);
+        }
+        set_pixel(framebuffer, x + 3, y + 2, true);
+        set_pixel(framebuffer, x + 5, y + 2, true);
+    } else if (strcmp(model->card_state, "ERROR") == 0) {
+        label = "ER";
+        for (int marker = 2; marker <= 5; ++marker) {
+            set_pixel(framebuffer, x + marker, y + marker - 1, true);
+            set_pixel(framebuffer, x + 7 - marker, y + marker - 1, true);
+        }
+    } else {
+        label = "IN";
+        set_pixel(framebuffer, x + 4, y + 2, true);
+        set_pixel(framebuffer, x + 4, y + 3, true);
+        set_pixel(framebuffer, x + 4, y + 5, true);
+    }
+
+    draw_text(framebuffer, x + 12, y + 1, label, 1, 2);
+}
+
+static void render_footer(
+    const r4_display_model_t *model,
+    r4_framebuffer_t *framebuffer
 ) {
     const int separator_y = framebuffer->height - 12;
 
@@ -530,86 +577,72 @@ static void render_footer(
         set_pixel(framebuffer, x, separator_y, true);
     }
 
-    draw_text(
+    render_card_indicator(
+        model,
         framebuffer,
         2,
-        separator_y + 3,
-        model->retroachievements_active ? "RA ON" : "RA OFF",
-        1,
-        5
+        separator_y + 2
     );
 
     char volume[8] = "VOL--";
 
     if (model->volume_available) {
-        snprintf(
-            volume,
-            sizeof(volume),
-            "VOL%u",
-            (unsigned int)model->volume_percent
-        );
+        if (model->volume_percent == 0U) {
+            strcpy(volume, "MUTE");
+        } else {
+            snprintf(
+                volume,
+                sizeof(volume),
+                "VOL%u",
+                (unsigned int)model->volume_percent
+            );
+        }
     }
 
     draw_text(
         framebuffer,
-        45,
+        91,
         separator_y + 3,
         volume,
         1,
         6
     );
-    if (game_screen) {
-        char elapsed[8];
-        const uint32_t hours =
-            model->game_elapsed_seconds / 3600U;
-        const uint32_t minutes =
-            (model->game_elapsed_seconds / 60U) % 60U;
-        const uint32_t seconds =
-            model->game_elapsed_seconds % 60U;
+}
 
-        if (hours > 0) {
-            snprintf(
-                elapsed,
-                sizeof(elapsed),
-                "%lu:%02lu",
-                (unsigned long)(hours > 99U ? 99U : hours),
-                (unsigned long)minutes
-            );
-        } else {
-            snprintf(
-                elapsed,
-                sizeof(elapsed),
-                "%02lu:%02lu",
-                (unsigned long)minutes,
-                (unsigned long)seconds
-            );
-        }
+static void render_game_status(
+    const r4_display_model_t *model,
+    r4_framebuffer_t *framebuffer
+) {
+    char elapsed[8];
+    const uint32_t hours =
+        model->game_elapsed_seconds / 3600U;
+    const uint32_t minutes =
+        (model->game_elapsed_seconds / 60U) % 60U;
+    const uint32_t seconds =
+        model->game_elapsed_seconds % 60U;
 
-        draw_text(
-            framebuffer,
-            96,
-            separator_y + 3,
+    if (hours > 0) {
+        snprintf(
             elapsed,
-            1,
-            5
+            sizeof(elapsed),
+            "%lu:%02lu",
+            (unsigned long)(hours > 99U ? 99U : hours),
+            (unsigned long)minutes
         );
     } else {
-        char firmware[8];
         snprintf(
-            firmware,
-            sizeof(firmware),
-            "V%.5s",
-            model->firmware_version
-        );
-        draw_text(
-            framebuffer,
-            91,
-            separator_y + 3,
-            firmware,
-            1,
-            6
+            elapsed,
+            sizeof(elapsed),
+            "%02lu:%02lu",
+            (unsigned long)minutes,
+            (unsigned long)seconds
         );
     }
+
+    if (model->replay_buffering) {
+        draw_text(framebuffer, 3, 43, "RPL", 1, 3);
+    }
+    draw_text(framebuffer, 96, 43, elapsed, 1, 5);
 }
 
 bool r4_display_render(
@@ -648,10 +681,18 @@ bool r4_display_render(
             draw_text(
                 framebuffer,
                 framebuffer->width / 2 - 12,
-                framebuffer->height / 2 + 11,
+                framebuffer->height / 2 + 10,
                 "BOOT",
                 1,
                 4
+            );
+            draw_text(
+                framebuffer,
+                framebuffer->width / 2 - 21,
+                framebuffer->height - 9,
+                model->firmware_version,
+                1,
+                7
             );
             break;
 
@@ -664,15 +705,15 @@ bool r4_display_render(
             render_status_bar(model, framebuffer);
             draw_text(framebuffer, 53, 13, "R4", 2, 2);
             draw_text(framebuffer, 17, 29, "BATOCERA", 2, 8);
-            char card[22];
-            snprintf(
-                card,
-                sizeof(card),
-                "CARD %.15s",
-                model->card_state
+            draw_text(
+                framebuffer,
+                2,
+                44,
+                model->retroachievements_active ? "RA ON" : "RA OFF",
+                1,
+                6
             );
-            draw_text(framebuffer, 2, 44, card, 1, 20);
-            render_footer(model, framebuffer, false);
+            render_footer(model, framebuffer);
             break;
         }
 
@@ -684,11 +725,8 @@ bool r4_display_render(
                 13,
                 model->system,
                 1,
-                model->replay_buffering ? 16 : 20
+                20
             );
-            if (model->replay_buffering) {
-                draw_text(framebuffer, 109, 13, "RPL", 1, 3);
-            }
             draw_wrapped_text(
                 framebuffer,
                 3,
@@ -696,7 +734,8 @@ bool r4_display_render(
                 model->game,
                 20
             );
-            render_footer(model, framebuffer, true);
+            render_game_status(model, framebuffer);
+            render_footer(model, framebuffer);
             break;
 
         case R4_DISPLAY_DIAGNOSTIC: {
@@ -714,6 +753,21 @@ bool r4_display_render(
                 4,
                 18,
                 model->diagnostic,
+                1,
+                20
+            );
+            char firmware[24];
+            snprintf(
+                firmware,
+                sizeof(firmware),
+                "FW %.18s",
+                model->firmware_version
+            );
+            draw_text(
+                framebuffer,
+                4,
+                31,
+                firmware,
                 1,
                 20
             );

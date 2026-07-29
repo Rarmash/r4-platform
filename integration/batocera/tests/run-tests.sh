@@ -15,7 +15,9 @@ mkdir -p "$TEMP_DIR/data" "$TEMP_DIR/runtime"
 
 for script in \
     "$INTEGRATION_DIR/install.sh" \
+    "$INTEGRATION_DIR/uninstall.sh" \
     "$INTEGRATION_DIR/bin/r4-ecctl" \
+    "$INTEGRATION_DIR/bin/r4-firmware-update" \
     "$INTEGRATION_DIR/bin/r4-led-state" \
     "$INTEGRATION_DIR/bin/r4-oled-tcp" \
     "$INTEGRATION_DIR/bin/r4-game-card" \
@@ -27,10 +29,128 @@ for script in \
     "$INTEGRATION_DIR/emulationstation/achievements/R4Achievement" \
     "$TEST_DIR/test-game-card.sh" \
     "$TEST_DIR/test-replay.sh" \
+    "$TEST_DIR/test-firmware-update.sh" \
     "$0"
 do
     sh -n "$script"
 done
+
+install_root="$TEMP_DIR/install-root"
+install_r4="$install_root/r4"
+install_services="$install_root/services"
+install_scripts="$install_root/scripts"
+install_achievements="$install_root/achievements"
+install_game_start="$install_root/game-start"
+install_game_selected="$install_root/game-selected"
+install_runtime="$TEMP_DIR/install-runtime"
+mock_batocera_services="$TEMP_DIR/mock-batocera-services"
+install_service_commands="$TEMP_DIR/install-service-commands.log"
+
+mkdir -p \
+    "$install_r4" \
+    "$install_services" \
+    "$install_scripts" \
+    "$install_achievements" \
+    "$install_game_start" \
+    "$install_game_selected" \
+    "$install_runtime"
+
+sed \
+    -e '/^R4_REPLAY_DRM_DEVICE=/d' \
+    -e '/^R4_REPLAY_READY_/d' \
+    -e "s|^R4_REPLAY_BUFFER_DIR=.*|R4_REPLAY_BUFFER_DIR=$TEMP_DIR/install-buffer|" \
+    "$INTEGRATION_DIR/replay.conf" \
+    > "$install_r4/replay.conf"
+sed -i 's/^R4_REPLAY_ENABLED=.*/R4_REPLAY_ENABLED=1/' \
+    "$install_r4/replay.conf"
+
+printf '%s\n' '#!/bin/sh' 'exit 0' \
+    > "$install_scripts/R4GameState.disabled"
+cp "$install_scripts/R4GameState.disabled" \
+    "$install_scripts/R4GameState.backup"
+cp "$install_scripts/R4GameState.disabled" \
+    "$install_r4/R4GameState.disabled"
+chmod +x \
+    "$install_scripts/R4GameState.disabled" \
+    "$install_scripts/R4GameState.backup" \
+    "$install_r4/R4GameState.disabled"
+
+cat > "$mock_batocera_services" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$R4_INSTALL_SERVICE_COMMANDS"
+EOF
+chmod +x "$mock_batocera_services"
+: > "$install_service_commands"
+
+install_once() {
+    R4_INSTALL_R4_DIR="$install_r4" \
+    R4_INSTALL_SERVICE_DIR="$install_services" \
+    R4_INSTALL_SCRIPT_DIR="$install_scripts" \
+    R4_INSTALL_ACHIEVEMENT_DIR="$install_achievements" \
+    R4_INSTALL_GAME_START_DIR="$install_game_start" \
+    R4_INSTALL_GAME_SELECTED_DIR="$install_game_selected" \
+    R4_BATOCERA_SERVICES="$mock_batocera_services" \
+    R4_INSTALL_SETTLE_SECONDS=0 \
+    R4_INSTALL_SERVICE_COMMANDS="$install_service_commands" \
+    R4_DATA_DIR="$install_r4" \
+    R4_RUNTIME_DIR="$install_runtime" \
+    R4_REPLAY_STATE_DIR="$install_runtime/replay-state" \
+    R4_REPLAY_CONFIG="$install_r4/replay.conf" \
+        "$INTEGRATION_DIR/install.sh" >/dev/null 2>&1
+}
+
+install_once
+
+grep -q '^R4_REPLAY_ENABLED=0$' "$install_r4/replay.conf"
+grep -q '^R4_BATOCERA_VERSION=0.12.0$' \
+    "$install_r4/integration-version.conf"
+
+# A deliberate experimental opt-in is preserved after the 0.12.0 migration.
+sed -i 's/^R4_REPLAY_ENABLED=.*/R4_REPLAY_ENABLED=1/' \
+    "$install_r4/replay.conf"
+install_once
+grep -q '^R4_REPLAY_ENABLED=1$' "$install_r4/replay.conf"
+
+[ -x "$install_r4/r4-replay" ]
+[ -x "$install_r4/r4-firmware-update" ]
+cmp "$install_r4/r4-firmware-update" \
+    "$INTEGRATION_DIR/bin/r4-firmware-update"
+cmp "$install_r4/r4-replay" "$INTEGRATION_DIR/bin/r4-replay"
+[ -x "$install_scripts/R4GameState" ]
+[ ! -e "$install_scripts/R4GameState.disabled" ]
+[ ! -x "$install_scripts/R4GameState.backup" ]
+[ ! -x "$install_r4/R4GameState.disabled" ]
+[ "$(
+    find "$install_scripts" -maxdepth 1 \
+        -type f -name 'R4GameState*' -perm /111 |
+        wc -l
+)" -eq 1 ]
+if grep -q '^R4_REPLAY_READY_' "$install_r4/replay.conf"; then
+    echo "installer replaced the preserved 0.11.0 replay configuration" >&2
+    exit 1
+fi
+
+R4_INSTALL_R4_DIR="$install_r4" \
+R4_INSTALL_SERVICE_DIR="$install_services" \
+R4_INSTALL_SCRIPT_DIR="$install_scripts" \
+R4_INSTALL_ACHIEVEMENT_DIR="$install_achievements" \
+R4_INSTALL_GAME_START_DIR="$install_game_start" \
+R4_INSTALL_GAME_SELECTED_DIR="$install_game_selected" \
+R4_BATOCERA_SERVICES="$mock_batocera_services" \
+R4_INSTALL_SERVICE_COMMANDS="$install_service_commands" \
+R4_DATA_DIR="$install_r4" \
+R4_REPLAY_STATE_DIR="$install_runtime/replay-state" \
+R4_REPLAY_BUFFER_DIR="$TEMP_DIR/install-buffer" \
+R4_REPLAY_CONFIG="$install_r4/replay.conf" \
+    "$INTEGRATION_DIR/uninstall.sh" >/dev/null
+
+[ ! -e "$install_r4/r4-replay" ]
+[ ! -e "$install_services/R4Controller" ]
+[ ! -e "$install_scripts/R4GameState" ]
+[ -f "$install_r4/replay.conf" ]
+[ ! -e "$install_runtime/replay-state" ]
+grep -q '^disable R4Controller$' "$install_service_commands"
+grep -q '^disable R4GameCard$' "$install_service_commands"
 
 service="$INTEGRATION_DIR/services/R4Controller"
 log_file="$TEMP_DIR/controller.log"
@@ -65,6 +185,10 @@ cat > "$capture_replay" <<'EOF'
 printf '%s\n' "$*" >> "$R4_CAPTURE_REPLAY_COMMANDS"
 case "$1" in
     save)
+        if [ "${R4_CAPTURE_REPLAY_DISABLED:-0}" = "1" ]; then
+            echo DISABLED
+            exit 0
+        fi
         if [ "${R4_CAPTURE_REPLAY_UNAVAILABLE:-0}" = "1" ]; then
             echo UNAVAILABLE
             exit 3
@@ -176,6 +300,23 @@ R4_ECCTL="$capture_ecctl" \
 R4_REPLAY_MANAGER="$capture_replay" \
 R4_CAPTURE_COMMANDS="$capture_commands" \
 R4_CAPTURE_REPLAY_COMMANDS="$capture_replay_commands" \
+R4_CAPTURE_REPLAY_DISABLED=1 \
+R4_ENABLE_TEST_EVENTS=1 \
+    "$service" test-event CAPTURE LONG
+
+[ ! -s "$capture_commands" ]
+grep -q \
+    'Capture long event seq=TEST result=IGNORED detail=experimental-replay-disabled' \
+    "$log_file"
+
+: > "$capture_commands"
+R4_DATA_DIR="$TEMP_DIR/data" \
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_REPLAY_MANAGER="$capture_replay" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_REPLAY_COMMANDS="$capture_replay_commands" \
 R4_CAPTURE_REPLAY_UNAVAILABLE=1 \
 R4_ENABLE_TEST_EVENTS=1 \
     "$service" test-event CAPTURE LONG
@@ -230,7 +371,7 @@ case "$*" in
         echo PONG
         ;;
     VERSION)
-        echo "R4_CONTROLLER_FW 0.10.0"
+        echo "R4_CONTROLLER_FW 0.12.0"
         ;;
     "HOST HEARTBEAT")
         echo "OK HOST HEARTBEAT"
@@ -265,10 +406,22 @@ chmod +x "$mock_game_card"
 cat > "$mock_replay" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$R4_MOCK_REPLAY_COMMANDS"
+[ -z "${R4_MOCK_REPLAY_ARGUMENTS:-}" ] || {
+    printf 'argc=%s\n' "$#" >> "$R4_MOCK_REPLAY_ARGUMENTS"
+    argument_index=1
+    for argument in "$@"; do
+        printf 'arg%s=<%s>\n' "$argument_index" "$argument" \
+            >> "$R4_MOCK_REPLAY_ARGUMENTS"
+        argument_index=$((argument_index + 1))
+    done
+}
+[ "${R4_MOCK_REPLAY_FAIL:-0}" != "1" ] || exit 1
 EOF
 
 chmod +x "$mock_replay"
 : > "$mock_replay_commands"
+mock_replay_arguments="$TEMP_DIR/mock-replay-arguments.log"
+: > "$mock_replay_arguments"
 
 title_lookup="$INTEGRATION_DIR/bin/r4-game-title"
 fixture_dir="$TEST_DIR/fixtures"
@@ -329,6 +482,37 @@ grep -q \
     "$mock_commands"
 grep -Fq "busy $quake_rom" "$mock_game_card_commands"
 grep -Fq "start psx $quake_rom Quake II" "$mock_replay_commands"
+
+special_rom="$fixture_dir/Odd & [Test] (USA).cue"
+: > "$mock_replay_arguments"
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_TITLE_LOOKUP="$title_lookup" \
+R4_ECCTL="$mock_ecctl" \
+R4_LED_STATE=/bin/true \
+R4_GAME_CARD_MANAGER="$mock_game_card" \
+R4_REPLAY_MANAGER="$mock_replay" \
+R4_LOG_FILE="$TEMP_DIR/game-events.log" \
+R4_MOCK_COMMANDS="$mock_commands" \
+R4_MOCK_GAME_CARD_COMMANDS="$mock_game_card_commands" \
+R4_MOCK_REPLAY_COMMANDS="$mock_replay_commands" \
+R4_MOCK_REPLAY_ARGUMENTS="$mock_replay_arguments" \
+R4_MOCK_REPLAY_FAIL=1 \
+    "$INTEGRATION_DIR/scripts/R4GameState" \
+    gameStart \
+    psx \
+    libretro \
+    pcsx_rearmed \
+    "$special_rom"
+
+grep -q '^argc=4$' "$mock_replay_arguments"
+grep -Fq 'arg1=<start>' "$mock_replay_arguments"
+grep -Fq 'arg2=<psx>' "$mock_replay_arguments"
+grep -Fq "arg3=<$special_rom>" "$mock_replay_arguments"
+grep -Fq 'arg4=<Odd & [Test]>' "$mock_replay_arguments"
+grep -Fq "busy $special_rom" "$mock_game_card_commands"
+grep -q \
+    '^HOST GAME ACTION=START SYSTEM_HEX=707378 GAME_HEX=4f64642026205b546573745d$' \
+    "$mock_commands"
 
 R4_ES_EVENT=game-selected \
 R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
@@ -451,5 +635,6 @@ grep -q 'Invalid R4_OLED_TCP_ENABLED' "$log_file"
 
 "$TEST_DIR/test-game-card.sh"
 "$TEST_DIR/test-replay.sh"
+"$TEST_DIR/test-firmware-update.sh"
 
 echo "Batocera shell, Capture, Replay, Game Card, broker, TCP framing, heartbeat and event mocks passed"

@@ -4,6 +4,17 @@ EXPECTED_VID="cafe"
 EXPECTED_PID="4005"
 EXPECTED_SERIAL="R4-0001"
 
+if [ "${1:-}" = "firmware" ] &&
+   [ "${2:-}" = "update" ]; then
+    shift 2
+    updater="${R4_FIRMWARE_UPDATER:-$(dirname "$0")/r4-firmware-update}"
+    [ -x "$updater" ] || {
+        echo "R4 firmware updater is unavailable: $updater" >&2
+        exit 1
+    }
+    exec "$updater" "$@"
+fi
+
 R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
 LOCK_DIR="$R4_RUNTIME_DIR/r4-ecctl.lock"
 SERVICE_PID_FILE="$R4_RUNTIME_DIR/r4-controller-service.pid"

@@ -8,14 +8,21 @@ BLKID="${R4_BLKID:-blkid}"
 MOUNT="${R4_MOUNT:-mount}"
 UMOUNT="${R4_UMOUNT:-umount}"
 SYNC="${R4_SYNC:-sync}"
+MODPROBE="${R4_MODPROBE:-modprobe}"
 PROC_MOUNTS="${R4_PROC_MOUNTS:-/proc/mounts}"
 CANDIDATES_FILE="${R4_GAME_CARD_CANDIDATES_FILE:-}"
+IDENTITIES_FILE="${R4_GAME_CARD_IDENTITIES_FILE:-}"
+SYS_CLASS_BLOCK="${R4_SYS_CLASS_BLOCK:-/sys/class/block}"
+FUSE_DEVICE="${R4_FUSE_DEVICE:-/dev/fuse}"
+FUSE_READY_FILE="${R4_FUSE_READY_FILE:-}"
 LOG_FILE="${R4_GAME_CARD_LOG:-$R4_DATA_DIR/r4-game-card.log}"
 
 STATE_FILE="$R4_RUNTIME_DIR/state"
 DEVICE_FILE="$R4_RUNTIME_DIR/device"
+IDENTITY_FILE="$R4_RUNTIME_DIR/identity"
 PRESENT_FILE="$R4_RUNTIME_DIR/present"
 EJECTED_FILE="$R4_RUNTIME_DIR/ejected"
+FUSE_ATTEMPT_FILE="$R4_RUNTIME_DIR/fuse-attempt"
 BUSY_DIR="$R4_RUNTIME_DIR/busy.d"
 LOCK_DIR="$R4_RUNTIME_DIR/lock"
 
@@ -253,10 +260,22 @@ notify_state() {
 
     [ "${R4_GAME_CARD_SUPPRESS_NOTIFY:-0}" != "1" ] || return 0
 
-    R4_ECCTL_BROKER_ONLY=1 \
-        "$ECCTL" HOST CARD "STATE=$notify_value" \
-        >/dev/null 2>&1 ||
-        true
+    if [ "$notify_value" = "EJECTED" ]; then
+        if [ -f "$PRESENT_FILE" ]; then
+            notify_present=1
+        else
+            notify_present=0
+        fi
+        R4_ECCTL_BROKER_ONLY=1 \
+            "$ECCTL" HOST CARD "STATE=$notify_value" \
+            "PRESENT=$notify_present" >/dev/null 2>&1 ||
+            true
+    else
+        R4_ECCTL_BROKER_ONLY=1 \
+            "$ECCTL" HOST CARD "STATE=$notify_value" \
+            >/dev/null 2>&1 ||
+            true
+    fi
 
     case "$notify_value" in
         INSERTED)
@@ -292,12 +311,12 @@ set_state() {
     state_detail="${2:-}"
     old_state="$(current_state)"
 
+    [ "$new_state" != "$old_state" ] || return 0
+
     printf '%s\n' "$new_state" > "$STATE_FILE" || return 1
-    if [ "$new_state" != "$old_state" ]; then
-        log_message \
-            "state=$new_state previous=$old_state detail=$state_detail"
-        notify_state "$new_state"
-    fi
+    log_message \
+        "state=$new_state previous=$old_state detail=$state_detail"
+    notify_state "$new_state"
 }
 
 list_devices() {
@@ -329,9 +348,49 @@ device_value() {
     "$BLKID" -s "$2" -o value "$1" 2>/dev/null || true
 }
 
+device_identity() {
+    identity_device="$1"
+
+    if [ -n "$IDENTITIES_FILE" ]; then
+        test_identity="$(
+            awk -F '|' -v device="$identity_device" \
+            '$1 == device { print $2; exit }' \
+            "$IDENTITIES_FILE"
+        )"
+        if [ -n "$test_identity" ]; then
+            printf '%s\n' "$test_identity"
+        else
+            printf 'PATH=%s\n' "$identity_device"
+        fi
+        return
+    fi
+
+    identity_name="${identity_device##*/}"
+    identity_uevent="$SYS_CLASS_BLOCK/$identity_name/uevent"
+    identity_diskseq="$(
+        sed -n 's/^DISKSEQ=//p' "$identity_uevent" 2>/dev/null |
+            head -n 1
+    )"
+    if [ -n "$identity_diskseq" ]; then
+        printf 'DISKSEQ=%s\n' "$identity_diskseq"
+        return
+    fi
+
+    identity_major_minor="$(
+        cat "$SYS_CLASS_BLOCK/$identity_name/dev" 2>/dev/null
+    )"
+    if [ -n "$identity_major_minor" ]; then
+        printf 'DEV=%s\n' "$identity_major_minor"
+        return
+    fi
+
+    printf 'PATH=%s\n' "$identity_device"
+}
+
 find_matching_device() {
     match_count=0
     matching_device=""
+    matching_identity=""
 
     for candidate in $(list_devices); do
         case "$candidate" in
@@ -351,10 +410,56 @@ find_matching_device() {
         if [ "$candidate_value" = "$expected_value" ]; then
             match_count=$((match_count + 1))
             matching_device="$candidate"
+            matching_identity="$(device_identity "$candidate")"
         fi
     done
 
     [ "$match_count" -eq 1 ]
+}
+
+fuse_is_usable() {
+    if [ -n "$FUSE_READY_FILE" ]; then
+        [ -e "$FUSE_READY_FILE" ]
+        return
+    fi
+
+    [ -c "$FUSE_DEVICE" ] &&
+        [ -r "$FUSE_DEVICE" ] &&
+        [ -w "$FUSE_DEVICE" ]
+}
+
+ensure_filesystem_support() {
+    filesystem_type="$(device_value "$matching_device" TYPE)"
+
+    [ "$filesystem_type" = "exfat" ] || return 0
+    fuse_is_usable && return 0
+
+    if [ "$(cat "$FUSE_ATTEMPT_FILE" 2>/dev/null)" = \
+            "$matching_identity" ]; then
+        set_state ERROR fuse-unavailable-after-attempt
+        return 1
+    fi
+
+    printf '%s\n' "$matching_identity" > "$FUSE_ATTEMPT_FILE" ||
+        return 1
+
+    log_message \
+        "FUSE unavailable for exFAT device=$matching_device; loading module"
+    if ! command -v "$MODPROBE" >/dev/null 2>&1 ||
+       ! "$MODPROBE" fuse >/dev/null 2>&1; then
+        set_state ERROR \
+            "fuse-modprobe-failed device=$matching_device"
+        return 1
+    fi
+
+    if ! fuse_is_usable; then
+        set_state ERROR \
+            "fuse-device-unavailable path=$FUSE_DEVICE"
+        return 1
+    fi
+
+    rm -f "$FUSE_ATTEMPT_FILE"
+    log_message "FUSE ready for exFAT device=$matching_device"
 }
 
 mount_record() {
@@ -508,7 +613,51 @@ refresh_ready_state() {
     fi
 }
 
+record_session() {
+    printf '%s\n' "$matching_device" > "$DEVICE_FILE" || return 1
+    printf '%s\n' "$matching_identity" > "$IDENTITY_FILE" || return 1
+    : > "$PRESENT_FILE"
+}
+
+stored_identity() {
+    cat "$IDENTITY_FILE" 2>/dev/null || true
+}
+
+ejected_identity() {
+    cat "$EJECTED_FILE" 2>/dev/null || true
+}
+
+notify_absent() {
+    [ "${R4_GAME_CARD_SUPPRESS_NOTIFY:-0}" != "1" ] || return 0
+    R4_ECCTL_BROKER_ONLY=1 \
+        "$ECCTL" HOST CARD STATE=EJECTED PRESENT=0 \
+        >/dev/null 2>&1 ||
+        true
+}
+
+session_is_stable() {
+    [ -f "$PRESENT_FILE" ] &&
+        [ "$(stored_identity)" = "$matching_identity" ]
+}
+
+prepare_card() {
+    [ "$R4_GAME_CARD_ENABLED" = "1" ] || return 0
+
+    if ! find_matching_device; then
+        [ "$match_count" -le 1 ] || {
+            set_state ERROR multiple-matches
+            return 1
+        }
+        return 0
+    fi
+
+    ensure_filesystem_support
+}
+
 scan_card() {
+    recovering_views=0
+    filesystem_ready=0
+
     if [ "$R4_GAME_CARD_ENABLED" = "0" ]; then
         set_state EJECTED disabled
         return 0
@@ -522,27 +671,61 @@ scan_card() {
 
         if [ -f "$PRESENT_FILE" ]; then
             if [ -f "$EJECTED_FILE" ]; then
-                rm -f "$PRESENT_FILE" "$EJECTED_FILE" "$DEVICE_FILE"
+                rm -f \
+                    "$PRESENT_FILE" \
+                    "$EJECTED_FILE" \
+                    "$DEVICE_FILE" \
+                    "$IDENTITY_FILE"
                 log_message "physical removal observed after safe eject"
+                notify_absent
             else
                 set_state ERROR unsafe-removal
-                rm -f "$PRESENT_FILE" "$DEVICE_FILE"
+                rm -f "$PRESENT_FILE" "$DEVICE_FILE" "$IDENTITY_FILE"
                 return 1
             fi
         fi
         return 0
     fi
 
-    if [ -f "$EJECTED_FILE" ] &&
-       [ "$(cat "$DEVICE_FILE" 2>/dev/null)" = "$matching_device" ]; then
-        set_state EJECTED waiting-for-removal
-        return 0
+    if [ -f "$EJECTED_FILE" ]; then
+        if [ "$(ejected_identity)" = "$matching_identity" ]; then
+            set_state EJECTED waiting-for-removal
+            return 0
+        fi
+
+        log_message \
+            "new physical session detected after safe eject old_identity=$(ejected_identity) new_identity=$matching_identity"
+        rm -f "$EJECTED_FILE"
     fi
 
-    printf '%s\n' "$matching_device" > "$DEVICE_FILE"
-    : > "$PRESENT_FILE"
-    set_state INSERTED detected
+    if session_is_stable; then
+        printf '%s\n' "$matching_device" > "$DEVICE_FILE"
+        case "$(current_state)" in
+            READY)
+                if views_ready; then
+                    return 0
+                fi
+                recovering_views=1
+                ;;
+            BUSY)
+                if views_ready; then
+                    return 0
+                fi
+                set_state ERROR busy-views-lost
+                return 1
+                ;;
+        esac
+    else
+        ensure_filesystem_support || return 1
+        filesystem_ready=1
+        record_session || return 1
+        set_state INSERTED \
+            "detected identity=$matching_identity device=$matching_device"
+    fi
 
+    [ "$filesystem_ready" -eq 1 ] ||
+        ensure_filesystem_support ||
+        return 1
     ensure_private_mount || return 1
     if ! structure_ready; then
         set_state INSERTED needs-init
@@ -550,7 +733,13 @@ scan_card() {
     fi
 
     publish_views || return 1
-    refresh_ready_state
+    if [ "$recovering_views" -eq 1 ]; then
+        log_message \
+            "state=READY previous=READY detail=views-recovered"
+        notify_state READY
+    else
+        refresh_ready_state
+    fi
 }
 
 init_card() {
@@ -566,10 +755,23 @@ init_card() {
         return 1
     fi
 
-    printf '%s\n' "$matching_device" > "$DEVICE_FILE"
-    : > "$PRESENT_FILE"
-    rm -f "$EJECTED_FILE"
-    set_state INSERTED initializing
+    if [ -f "$EJECTED_FILE" ]; then
+        if [ "$(ejected_identity)" = "$matching_identity" ]; then
+            fail "safely ejected card must be physically reconnected"
+            return 1
+        fi
+        rm -f "$EJECTED_FILE"
+    fi
+
+    if session_is_stable && structure_ready && views_ready; then
+        refresh_ready_state
+        return 0
+    fi
+
+    ensure_filesystem_support || return 1
+    record_session || return 1
+    set_state INSERTED \
+        "initializing identity=$matching_identity device=$matching_device"
     ensure_private_mount || return 1
 
     mkdir -p \
@@ -610,7 +812,12 @@ eject_card() {
         return 1
     fi
 
-    : > "$EJECTED_FILE"
+    eject_identity="$(stored_identity)"
+    [ -n "$eject_identity" ] || {
+        set_state ERROR missing-session-identity
+        return 1
+    }
+    printf '%s\n' "$eject_identity" > "$EJECTED_FILE" || return 1
     set_state EJECTED safe-eject
 }
 
@@ -682,10 +889,12 @@ capture_dir() {
 
 show_status() {
     status_device="$(cat "$DEVICE_FILE" 2>/dev/null || true)"
+    status_identity="$(stored_identity)"
     status_busy="$(busy_names)"
-    printf 'STATE=%s DEVICE=%s PRIVATE=%s ROMS=%s SCREENSHOTS=%s VIDEOS=%s BUSY=%s\n' \
+    printf 'STATE=%s DEVICE=%s IDENTITY=%s PRIVATE=%s ROMS=%s SCREENSHOTS=%s VIDEOS=%s BUSY=%s\n' \
         "$(current_state)" \
         "${status_device:-NONE}" \
+        "${status_identity:-NONE}" \
         "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" \
         "$R4_GAME_CARD_ROMS_MOUNTPOINT" \
         "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" \
@@ -719,11 +928,12 @@ case "$command_name" in
             exit 1
         capture_dir "$2"
         ;;
-    scan|init|eject|busy|idle|busy-add|busy-remove|operation-error)
+    scan|prepare|init|eject|busy|idle|busy-add|busy-remove|operation-error)
         acquire_lock || exit 1
         trap 'release_lock' 0 1 2 15
         case "$command_name" in
             scan) scan_card ;;
+            prepare) prepare_card ;;
             init) init_card ;;
             eject) eject_card ;;
             busy)
@@ -755,7 +965,7 @@ case "$command_name" in
         ;;
     *)
         echo \
-            "Usage: $0 {scan|init|status|eject|busy <rom>|idle|busy-add <owner>|busy-remove <owner>|busy-list|capture-dir <screenshots|videos>|operation-error <owner> <detail>|run}" \
+            "Usage: $0 {scan|prepare|init|status|eject|busy <rom>|idle|busy-add <owner>|busy-remove <owner>|busy-list|capture-dir <screenshots|videos>|operation-error <owner> <detail>|run}" \
             >&2
         exit 1
         ;;

@@ -9,6 +9,7 @@ GAME_CARD="${R4_GAME_CARD_MANAGER:-$R4_DATA_DIR/r4-game-card}"
 REPLAY="${R4_REPLAY_MANAGER:-$R4_DATA_DIR/r4-replay}"
 LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-game-events.log}"
 METADATA_CACHE="$R4_RUNTIME_DIR/r4-game-metadata"
+GAME_RUNNING_FILE="$R4_RUNTIME_DIR/r4-game-running"
 
 event="$1"
 system_name="$2"
@@ -81,6 +82,7 @@ game_title_text() {
 
 case "$event" in
     gameStart)
+        printf '%s\n' "$$" > "$GAME_RUNNING_FILE"
         log_event
         resolved_game_title="$(game_title_text)"
         if [ -x "$GAME_CARD" ]; then
@@ -121,6 +123,7 @@ case "$event" in
             >/dev/null 2>&1 ||
             true
         rm -f "$METADATA_CACHE"
+        rm -f "$GAME_RUNNING_FILE"
         ;;
 esac
 

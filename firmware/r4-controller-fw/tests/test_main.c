@@ -10,6 +10,7 @@
 #include "r4_input_source.h"
 #include "r4_protocol.h"
 #include "r4_service_buttons.h"
+#include "r4_update.h"
 
 static int failures;
 static int checks;
@@ -235,6 +236,37 @@ static void test_protocol_parser(void) {
     );
     CHECK(command.type == R4_COMMAND_FRAMEBUFFER_INFO);
 
+    const char update_arm[] = "UPDATE ARM";
+    CHECK(
+        r4_protocol_parse(
+            update_arm,
+            sizeof(update_arm) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_UPDATE_ARM);
+
+    const char update_status[] = "UPDATE STATUS";
+    CHECK(
+        r4_protocol_parse(
+            update_status,
+            sizeof(update_status) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_UPDATE_STATUS);
+
+    const char update_confirm[] = "UPDATE CONFIRM A1B2C3D4";
+    CHECK(
+        r4_protocol_parse(
+            update_confirm,
+            sizeof(update_confirm) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_UPDATE_CONFIRM);
+    CHECK(strcmp(command.payload, "A1B2C3D4") == 0);
+
     const char framebuffer_chunk[] =
         "FRAMEBUFFER CHUNK ID=7 OFFSET=96 LENGTH=32";
     CHECK(
@@ -332,6 +364,33 @@ static void test_protocol_parser(void) {
     );
     CHECK(command.type == R4_COMMAND_HOST_CARD);
     CHECK(strcmp(command.payload, "STATE=READY") == 0);
+    const char ejected_present[] =
+        "HOST CARD STATE=EJECTED PRESENT=1";
+    CHECK(
+        r4_protocol_parse(
+            ejected_present,
+            sizeof(ejected_present) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    const char ejected_absent[] =
+        "HOST CARD STATE=EJECTED PRESENT=0";
+    CHECK(
+        r4_protocol_parse(
+            ejected_absent,
+            sizeof(ejected_absent) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    const char invalid_presence[] =
+        "HOST CARD STATE=EJECTED PRESENT=2";
+    CHECK(
+        r4_protocol_parse(
+            invalid_presence,
+            sizeof(invalid_presence) - 1U,
+            &command
+        ) == R4_PARSE_INVALID_VALUE
+    );
     const char invalid_card[] = "HOST CARD STATE=ABSENT";
     CHECK(
         r4_protocol_parse(
@@ -378,6 +437,82 @@ static void test_protocol_parser(void) {
     );
 }
 
+static void test_firmware_update_gate(void) {
+    r4_update_manager_t manager;
+    r4_update_init(&manager);
+
+    uint32_t remaining = 123U;
+    CHECK(
+        r4_update_status(&manager, 100U, &remaining) ==
+        R4_UPDATE_IDLE
+    );
+    CHECK(remaining == 0U);
+    CHECK(
+        r4_update_confirm(&manager, 0x12345678U, 100U) ==
+        R4_UPDATE_CONFIRM_NOT_ARMED
+    );
+
+    r4_update_arm(&manager, 0x12345678U, 1000U);
+    CHECK(
+        r4_update_status(&manager, 1000U, &remaining) ==
+        R4_UPDATE_ARMED
+    );
+    CHECK(remaining == R4_UPDATE_TOKEN_TTL_MS);
+    CHECK(
+        r4_update_confirm(&manager, 0x87654321U, 1001U) ==
+        R4_UPDATE_CONFIRM_INVALID_TOKEN
+    );
+    CHECK(
+        r4_update_status(&manager, 1001U, NULL) ==
+        R4_UPDATE_ARMED
+    );
+    CHECK(
+        r4_update_confirm(&manager, 0x12345678U, 1002U) ==
+        R4_UPDATE_CONFIRM_OK
+    );
+    CHECK(
+        r4_update_confirm(&manager, 0x12345678U, 1003U) ==
+        R4_UPDATE_CONFIRM_ALREADY_USED
+    );
+    CHECK(
+        r4_update_confirm(&manager, 0x87654321U, 1003U) ==
+        R4_UPDATE_CONFIRM_NOT_ARMED
+    );
+
+    r4_update_arm(&manager, 0xAABBCCDDU, 5000U);
+    CHECK(
+        r4_update_confirm(
+            &manager,
+            0xAABBCCDDU,
+            5000U + R4_UPDATE_TOKEN_TTL_MS
+        ) == R4_UPDATE_CONFIRM_EXPIRED
+    );
+    CHECK(
+        r4_update_status(
+            &manager,
+            5000U + R4_UPDATE_TOKEN_TTL_MS,
+            &remaining
+        ) == R4_UPDATE_IDLE
+    );
+
+    uint32_t parsed = 0;
+    CHECK(r4_update_parse_token("0123ABcd", &parsed));
+    CHECK(parsed == 0x0123ABCDU);
+    CHECK(!r4_update_parse_token("123", &parsed));
+    CHECK(!r4_update_parse_token("0123ABCG", &parsed));
+
+    /* Unrelated CDC commands only parse; they never arm the update gate. */
+    r4_command_t command;
+    CHECK(
+        r4_protocol_parse("PING", 4U, &command) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_PING);
+    CHECK(
+        r4_update_status(&manager, 20000U, NULL) ==
+        R4_UPDATE_IDLE
+    );
+}
+
 static void test_protocol_formatting(void) {
     r4_controller_state_t state;
     r4_controller_state_reset(&state);
@@ -413,7 +548,7 @@ static void test_protocol_formatting(void) {
         r4_protocol_format_status(
             output,
             sizeof(output),
-            "0.10.0",
+            "0.12.0",
             1,
             2,
             3,
@@ -425,7 +560,7 @@ static void test_protocol_formatting(void) {
         )
     );
     CHECK(
-        strstr(output, "FW=0.10.0 LED=1,2,3") == output
+        strstr(output, "FW=0.12.0 LED=1,2,3") == output
     );
 }
 
@@ -702,19 +837,89 @@ static void test_display_snapshots(void) {
     };
     r4_display_model_t model;
     r4_display_model_init(&model);
+    strcpy(model.firmware_version, "0.12.0");
 
     CHECK(r4_display_render(&model, &framebuffer));
     const uint32_t boot_hash = r4_display_hash(&framebuffer);
     CHECK(boot_hash != 0);
+    strcpy(model.firmware_version, "9.9.9");
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) != boot_hash);
+    strcpy(model.firmware_version, "0.12.0");
 
-    model.screen = R4_DISPLAY_GAME;
-    strcpy(model.system, "NES");
-    strcpy(model.game, "MARIO");
+    model.screen = R4_DISPLAY_HOME;
     strcpy(model.time, "12:34");
     model.network_connected = true;
     model.battery_available = true;
     model.battery_percent = 75;
+    model.remaining_runtime_available = true;
+    model.remaining_runtime_minutes = 90;
+    model.volume_available = true;
+    model.volume_percent = 65;
+    model.orange_pi_connected = true;
     model.retroachievements_active = true;
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t absent_card_hash =
+        r4_display_hash(&framebuffer);
+
+    model.card_present = true;
+    strcpy(model.card_state, "READY");
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t ready_card_hash =
+        r4_display_hash(&framebuffer);
+    CHECK(ready_card_hash != absent_card_hash);
+
+    model.orange_pi_connected = false;
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) == ready_card_hash);
+    model.orange_pi_connected = true;
+
+    model.volume_percent = 100;
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) != ready_card_hash);
+    model.volume_percent = 65;
+
+    model.retroachievements_active = false;
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) != ready_card_hash);
+    model.retroachievements_active = true;
+
+    strcpy(model.card_state, "BUSY");
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t busy_card_hash =
+        r4_display_hash(&framebuffer);
+    CHECK(busy_card_hash != ready_card_hash);
+
+    strcpy(model.card_state, "EJECTED");
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t ejected_card_hash =
+        r4_display_hash(&framebuffer);
+    CHECK(ejected_card_hash != busy_card_hash);
+    CHECK(ejected_card_hash != absent_card_hash);
+
+    strcpy(model.card_state, "ERROR");
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) != ejected_card_hash);
+
+    strcpy(model.card_state, "READY");
+    strcpy(model.firmware_version, "9.9.9");
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) == ready_card_hash);
+    strcpy(model.firmware_version, "0.12.0");
+
+    model.screen = R4_DISPLAY_DIAGNOSTIC;
+    strcpy(model.diagnostic, "CDC OK");
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t diagnostic_hash =
+        r4_display_hash(&framebuffer);
+    strcpy(model.firmware_version, "9.9.9");
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(r4_display_hash(&framebuffer) != diagnostic_hash);
+    strcpy(model.firmware_version, "0.12.0");
+
+    model.screen = R4_DISPLAY_GAME;
+    strcpy(model.system, "NES");
+    strcpy(model.game, "MARIO");
     CHECK(r4_display_render(&model, &framebuffer));
     const uint32_t game_hash = r4_display_hash(&framebuffer);
     CHECK(game_hash != 0);
@@ -864,6 +1069,7 @@ int main(void) {
     test_input_sources();
     test_protocol_parser();
     test_protocol_formatting();
+    test_firmware_update_gate();
     test_r4_short();
     test_r4_long();
     test_r4_double_and_debounce();

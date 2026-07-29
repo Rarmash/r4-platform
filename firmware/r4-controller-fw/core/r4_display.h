@@ -56,6 +56,7 @@ typedef struct {
     bool host_link_lost;
     bool clock_colon_visible;
     bool replay_buffering;
+    bool card_present;
 } r4_display_model_t;
 
 typedef struct {

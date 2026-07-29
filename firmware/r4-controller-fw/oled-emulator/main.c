@@ -25,6 +25,7 @@ typedef struct {
 
 static void setup_boot(r4_display_model_t *model) {
     model->screen = R4_DISPLAY_BOOT;
+    strcpy(model->firmware_version, "0.12.0");
 }
 
 static void setup_waiting(r4_display_model_t *model) {
@@ -33,7 +34,7 @@ static void setup_waiting(r4_display_model_t *model) {
 
 static void setup_home(r4_display_model_t *model) {
     model->screen = R4_DISPLAY_HOME;
-    strcpy(model->firmware_version, "0.10.0");
+    strcpy(model->firmware_version, "0.12.0");
     strcpy(model->time, "12:34");
     model->battery_available = true;
     model->battery_percent = 78;
@@ -65,6 +66,7 @@ static void setup_achievement(r4_display_model_t *model) {
 
 static void setup_diagnostic(r4_display_model_t *model) {
     model->screen = R4_DISPLAY_DIAGNOSTIC;
+    strcpy(model->firmware_version, "0.12.0");
     strcpy(model->diagnostic, "CDC OK ADC NO SOURCE");
     model->temperature_available = true;
     model->temperature_millicelsius = 42125;
@@ -76,12 +78,12 @@ static void setup_error(r4_display_model_t *model) {
 }
 
 static const scenario_t scenarios[] = {
-    {"boot", setup_boot, UINT32_C(0xC8B14A84)},
+    {"boot", setup_boot, UINT32_C(0x5F099C3E)},
     {"waiting", setup_waiting, UINT32_C(0x717C7A4F)},
-    {"home", setup_home, UINT32_C(0xAF2D1387)},
-    {"game", setup_game, UINT32_C(0x05667CE6)},
-    {"achievement", setup_achievement, UINT32_C(0xFB917295)},
-    {"diagnostic", setup_diagnostic, UINT32_C(0x55B0FB19)},
+    {"home", setup_home, UINT32_C(0x4C803D22)},
+    {"game", setup_game, UINT32_C(0x05813A9C)},
+    {"achievement", setup_achievement, UINT32_C(0x4A9F269D)},
+    {"diagnostic", setup_diagnostic, UINT32_C(0x64CAFA6E)},
     {"error", setup_error, UINT32_C(0x755B64C2)}
 };
 

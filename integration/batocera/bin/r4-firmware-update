@@ -1,0 +1,433 @@
+#!/bin/sh
+
+set -u
+
+EXPECTED_CONTROLLER_VID="cafe"
+EXPECTED_CONTROLLER_PID="4005"
+EXPECTED_CONTROLLER_SERIAL="R4-0001"
+EXPECTED_BOOT_VID="2e8a"
+EXPECTED_BOOT_PID="0003"
+EXPECTED_BOOT_LABEL="RPI-RP2"
+EXPECTED_UF2_FAMILY_BYTES="56 ff 8b e4"
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
+ECCTL="${R4_UPDATE_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+SERVICES="${R4_BATOCERA_SERVICES:-batocera-services}"
+UDEVADM="${R4_UDEVADM:-udevadm}"
+MOUNT="${R4_MOUNT:-mount}"
+UMOUNT="${R4_UMOUNT:-umount}"
+CP="${R4_CP:-cp}"
+SYNC="${R4_SYNC:-sync}"
+SHA256SUM="${R4_SHA256SUM:-sha256sum}"
+MKTEMP="${R4_MKTEMP:-mktemp}"
+SLEEP="${R4_SLEEP:-sleep}"
+CONTROLLER_LIST="${R4_UPDATE_CONTROLLER_LIST:-}"
+BOOTLOADER_LIST="${R4_UPDATE_BOOTLOADER_LIST:-}"
+GAME_CHECK="${R4_UPDATE_GAME_CHECK:-}"
+
+BOOT_TIMEOUT="${R4_UPDATE_BOOT_TIMEOUT:-15}"
+COPY_TIMEOUT="${R4_UPDATE_COPY_TIMEOUT:-30}"
+RETURN_TIMEOUT="${R4_UPDATE_RETURN_TIMEOUT:-20}"
+POLL_INTERVAL="${R4_UPDATE_POLL_INTERVAL:-1}"
+
+SERVICE_STOPPED=0
+MOUNTED=0
+MOUNTPOINT=""
+BOOT_DEVICE=""
+UPDATE_STARTED=0
+
+fail() {
+    echo "ERROR: $*" >&2
+    if [ "$UPDATE_STARTED" -eq 1 ]; then
+        echo \
+            "Recovery: hold BOOTSEL while connecting RP2040, then copy the verified UF2 to RPI-RP2 manually." \
+            >&2
+        echo \
+            "The RP2040 ROM bootloader provides no rollback guarantee." \
+            >&2
+    fi
+    exit 1
+}
+
+cleanup() {
+    if [ "$MOUNTED" -eq 1 ] && [ -n "$MOUNTPOINT" ]; then
+        "$UMOUNT" "$MOUNTPOINT" >/dev/null 2>&1 || true
+        MOUNTED=0
+    fi
+    if [ -n "$MOUNTPOINT" ] && [ -d "$MOUNTPOINT" ]; then
+        rmdir "$MOUNTPOINT" >/dev/null 2>&1 || true
+    fi
+    if [ "$SERVICE_STOPPED" -eq 1 ]; then
+        "$SERVICES" start R4Controller >/dev/null 2>&1 || true
+        SERVICE_STOPPED=0
+    fi
+}
+
+trap cleanup 0
+trap 'exit 1' 1 2 15
+
+read_manifest_value() {
+    manifest_key="$1"
+    manifest_file="$2"
+    sed -n "s/^$manifest_key=//p" "$manifest_file"
+}
+
+hex_bytes() {
+    offset="$1"
+    count="$2"
+    file="$3"
+    od -An -v -tx1 -j "$offset" -N "$count" "$file" 2>/dev/null |
+        tr -s ' ' |
+        sed 's/^ //; s/ $//'
+}
+
+validate_uf2_structure() {
+    uf2_file="$1"
+    uf2_size="$(wc -c < "$uf2_file" 2>/dev/null)" ||
+        return 1
+    case "$uf2_size" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$uf2_size" -ge 512 ] &&
+        [ $((uf2_size % 512)) -eq 0 ] ||
+        return 1
+
+    block_offset=0
+    while [ "$block_offset" -lt "$uf2_size" ]; do
+        [ "$(hex_bytes "$block_offset" 8 "$uf2_file")" = \
+            "55 46 32 0a 57 51 5d 9e" ] ||
+            return 1
+        [ "$(hex_bytes $((block_offset + 28)) 4 "$uf2_file")" = \
+            "$EXPECTED_UF2_FAMILY_BYTES" ] ||
+            return 1
+        [ "$(hex_bytes $((block_offset + 508)) 4 "$uf2_file")" = \
+            "30 6f b1 0a" ] ||
+            return 1
+        block_offset=$((block_offset + 512))
+    done
+}
+
+find_manifest() {
+    uf2_file="$1"
+    if [ -f "$uf2_file.manifest" ]; then
+        printf '%s\n' "$uf2_file.manifest"
+        return 0
+    fi
+    uf2_without_extension="${uf2_file%.*}"
+    if [ -f "$uf2_without_extension.manifest" ]; then
+        printf '%s\n' "$uf2_without_extension.manifest"
+        return 0
+    fi
+    return 1
+}
+
+validate_release() {
+    UF2_FILE="$1"
+    [ -f "$UF2_FILE" ] || fail "UF2 file does not exist: $UF2_FILE"
+    case "$UF2_FILE" in
+        *.uf2) ;;
+        *) fail "firmware file must use the .uf2 extension" ;;
+    esac
+    validate_uf2_structure "$UF2_FILE" ||
+        fail "invalid UF2 structure or non-RP2040 family ID"
+
+    MANIFEST_FILE="$(find_manifest "$UF2_FILE")" ||
+        fail "release manifest is required next to the UF2"
+    manifest_lines="$(wc -l < "$MANIFEST_FILE" 2>/dev/null)" ||
+        fail "unable to read release manifest"
+    [ "$manifest_lines" -eq 5 ] ||
+        fail "invalid release manifest"
+
+    manifest_product="$(read_manifest_value R4_UF2_PRODUCT "$MANIFEST_FILE")"
+    manifest_family="$(read_manifest_value R4_UF2_FAMILY_ID "$MANIFEST_FILE")"
+    TARGET_VERSION="$(read_manifest_value R4_FIRMWARE_VERSION "$MANIFEST_FILE")"
+    manifest_file="$(read_manifest_value R4_UF2_FILE "$MANIFEST_FILE")"
+    manifest_sha="$(read_manifest_value R4_UF2_SHA256 "$MANIFEST_FILE")"
+
+    [ "$manifest_product" = "R4 Controller" ] ||
+        fail "manifest product is not R4 Controller"
+    [ "$manifest_family" = "0xE48BFF56" ] ||
+        fail "manifest family is not RP2040"
+    printf '%s\n' "$TARGET_VERSION" |
+        grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-dev)?$' ||
+        fail "manifest firmware version is invalid"
+    [ "$manifest_file" = "$(basename "$UF2_FILE")" ] ||
+        fail "manifest UF2 filename does not match"
+    printf '%s\n' "$manifest_sha" |
+        grep -Eq '^[0-9A-Fa-f]{64}$' ||
+        fail "manifest SHA-256 is invalid"
+
+    actual_sha="$("$SHA256SUM" "$UF2_FILE" 2>/dev/null | awk '{print $1}')" ||
+        fail "unable to calculate UF2 SHA-256"
+    [ "$(printf '%s' "$actual_sha" | tr 'A-F' 'a-f')" = \
+      "$(printf '%s' "$manifest_sha" | tr 'A-F' 'a-f')" ] ||
+        fail "UF2 SHA-256 does not match the manifest"
+
+    checksum_file="$UF2_FILE.sha256"
+    if [ -f "$checksum_file" ]; then
+        checksum_sha="$(awk 'NR == 1 { print $1 }' "$checksum_file")"
+        [ "$(printf '%s' "$checksum_sha" | tr 'A-F' 'a-f')" = \
+          "$(printf '%s' "$actual_sha" | tr 'A-F' 'a-f')" ] ||
+            fail "UF2 SHA-256 does not match the checksum file"
+    fi
+    UF2_SHA256="$actual_sha"
+}
+
+game_is_running() {
+    if [ -n "$GAME_CHECK" ]; then
+        "$GAME_CHECK"
+        return $?
+    fi
+    [ -f "$R4_RUNTIME_DIR/r4-game-running" ] && return 0
+    for process_name in retroarch mupen64plus pcsx2 flycast dolphin-emu; do
+        pidof "$process_name" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+controller_devices() {
+    if [ -n "$CONTROLLER_LIST" ]; then
+        "$CONTROLLER_LIST"
+        return
+    fi
+    for device in /dev/ttyACM*; do
+        [ -e "$device" ] || continue
+        properties="$("$UDEVADM" info --query=property --name="$device" 2>/dev/null)"
+        vid="$(printf '%s\n' "$properties" | sed -n 's/^ID_VENDOR_ID=//p')"
+        pid="$(printf '%s\n' "$properties" | sed -n 's/^ID_MODEL_ID=//p')"
+        serial="$(printf '%s\n' "$properties" | sed -n 's/^ID_SERIAL_SHORT=//p')"
+        interface="$(printf '%s\n' "$properties" | sed -n 's/^ID_USB_INTERFACE_NUM=//p')"
+        interfaces="$(printf '%s\n' "$properties" | sed -n 's/^ID_USB_INTERFACES=//p')"
+        if [ "$vid" = "$EXPECTED_CONTROLLER_VID" ] &&
+           [ "$pid" = "$EXPECTED_CONTROLLER_PID" ] &&
+           [ "$serial" = "$EXPECTED_CONTROLLER_SERIAL" ] &&
+           [ "$interface" = "00" ]; then
+            printf '%s|%s\n' "$device" "$interfaces"
+        fi
+    done
+}
+
+controller_count() {
+    controller_devices | sed '/^$/d' | wc -l
+}
+
+controller_complete() {
+    complete_lines="$(controller_devices)"
+    [ "$(printf '%s\n' "$complete_lines" | sed '/^$/d' | wc -l)" -eq 1 ] ||
+        return 1
+    printf '%s\n' "$complete_lines" |
+        grep -Eq '\|.*:03[0-9A-Fa-f]{4}:'
+}
+
+bootloader_devices_raw() {
+    if [ -n "$BOOTLOADER_LIST" ]; then
+        "$BOOTLOADER_LIST"
+        return
+    fi
+    for sys_block in /sys/class/block/*; do
+        [ -f "$sys_block/partition" ] || continue
+        device="/dev/$(basename "$sys_block")"
+        [ -b "$device" ] || continue
+        properties="$("$UDEVADM" info --query=property --name="$device" 2>/dev/null)"
+        vid="$(printf '%s\n' "$properties" | sed -n 's/^ID_VENDOR_ID=//p')"
+        pid="$(printf '%s\n' "$properties" | sed -n 's/^ID_MODEL_ID=//p')"
+        label="$(printf '%s\n' "$properties" | sed -n 's/^ID_FS_LABEL=//p')"
+        printf '%s|%s|%s|%s\n' "$device" "$vid" "$pid" "$label"
+    done
+}
+
+qualified_bootloaders() {
+    bootloader_devices_raw |
+        awk -F '|' \
+            -v vid="$EXPECTED_BOOT_VID" \
+            -v pid="$EXPECTED_BOOT_PID" \
+            -v label="$EXPECTED_BOOT_LABEL" \
+            '$2 == vid && $3 == pid && $4 == label { print $1 }'
+}
+
+wait_for_bootloader() {
+    attempts=0
+    while [ "$attempts" -lt "$BOOT_TIMEOUT" ]; do
+        candidates="$(qualified_bootloaders)"
+        candidate_count="$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l)"
+        [ "$candidate_count" -le 1 ] ||
+            fail "multiple matching RPI-RP2 bootloaders found"
+        if [ "$candidate_count" -eq 1 ]; then
+            BOOT_DEVICE="$(printf '%s\n' "$candidates" | sed -n '1p')"
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        "$SLEEP" "$POLL_INTERVAL"
+    done
+    fail "RPI-RP2 bootloader did not appear before timeout"
+}
+
+wait_for_bootloader_to_leave() {
+    attempts=0
+    while [ "$attempts" -lt "$RETURN_TIMEOUT" ]; do
+        candidates="$(qualified_bootloaders)"
+        candidate_count="$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l)"
+        [ "$candidate_count" -le 1 ] ||
+            fail "multiple matching RPI-RP2 bootloaders found"
+        [ "$candidate_count" -eq 0 ] && return 0
+        attempts=$((attempts + 1))
+        "$SLEEP" "$POLL_INTERVAL"
+    done
+    fail "RPI-RP2 bootloader did not disappear before timeout"
+}
+
+wait_for_controller() {
+    attempts=0
+    while [ "$attempts" -lt "$RETURN_TIMEOUT" ]; do
+        if controller_complete; then
+            return 0
+        fi
+        count="$(controller_count)"
+        [ "$count" -le 1 ] ||
+            fail "multiple R4 Controllers appeared after update"
+        attempts=$((attempts + 1))
+        "$SLEEP" "$POLL_INTERVAL"
+    done
+    fail "R4 Controller CDC/HID did not return before timeout"
+}
+
+usage() {
+    echo "Usage: r4-ecctl firmware update [--yes] <firmware.uf2>" >&2
+}
+
+ASSUME_YES=0
+if [ "${1:-}" = "--yes" ]; then
+    ASSUME_YES=1
+    shift
+fi
+[ "$#" -eq 1 ] || {
+    usage
+    exit 1
+}
+
+validate_release "$1" || exit 1
+game_is_running && {
+    fail "firmware update is forbidden while a game/emulator is running"
+    exit 1
+}
+
+connected_count="$(controller_count)"
+[ "$connected_count" -eq 1 ] || {
+    fail "expected exactly one R4 Controller, found $connected_count"
+    exit 1
+}
+
+CURRENT_RESPONSE="$("$ECCTL" VERSION 2>/dev/null)" || {
+    fail "unable to read current firmware version"
+    exit 1
+}
+CURRENT_VERSION="${CURRENT_RESPONSE#R4_CONTROLLER_FW }"
+[ "$CURRENT_VERSION" != "$CURRENT_RESPONSE" ] || {
+    fail "invalid current firmware version response"
+    exit 1
+}
+
+echo "R4 host-assisted USB firmware update"
+echo "Current firmware: $CURRENT_VERSION"
+echo "Target firmware:  $TARGET_VERSION"
+echo "UF2 SHA-256:      $UF2_SHA256 (integrity only, not authenticity)"
+echo "No automatic rollback is provided by the RP2040 ROM bootloader."
+
+if [ "$ASSUME_YES" -ne 1 ]; then
+    [ -t 0 ] || {
+        fail "interactive confirmation required; use --yes for documented non-interactive operation"
+        exit 1
+    }
+    printf 'Type UPDATE to continue: '
+    IFS= read -r confirmation
+    [ "$confirmation" = "UPDATE" ] || {
+        echo "Update cancelled."
+        exit 1
+    }
+fi
+
+"$SERVICES" stop R4Controller >/dev/null 2>&1 || {
+    fail "unable to stop R4Controller service"
+    exit 1
+}
+SERVICE_STOPPED=1
+
+arm_response="$(R4_ECCTL_DIRECT=1 "$ECCTL" UPDATE ARM 2>/dev/null)" || {
+    fail "UPDATE ARM failed; firmware 0.11.1 requires one final manual BOOTSEL installation"
+    exit 1
+}
+case "$arm_response" in
+    "ERR UNKNOWN_COMMAND"|"ERR UPDATE_USAGE")
+        fail "installed firmware does not support host-assisted update; install 0.12.0 with physical BOOTSEL one final time"
+        ;;
+esac
+token="$(printf '%s\n' "$arm_response" |
+    sed -n 's/^UPDATE ARMED TOKEN=\([0-9A-Fa-f]\{8\}\) TTL_MS=[0-9][0-9]*$/\1/p')"
+[ -n "$token" ] || {
+    fail "invalid UPDATE ARM response: $arm_response"
+    exit 1
+}
+
+confirm_response="$(R4_ECCTL_DIRECT=1 "$ECCTL" UPDATE CONFIRM "$token" 2>/dev/null)" || {
+    fail "UPDATE CONFIRM failed"
+    exit 1
+}
+[ "$confirm_response" = "OK UPDATE BOOTLOADER" ] || {
+    fail "controller rejected UPDATE CONFIRM: $confirm_response"
+    exit 1
+}
+UPDATE_STARTED=1
+
+wait_for_bootloader || exit 1
+MOUNTPOINT="$("$MKTEMP" -d "$R4_RUNTIME_DIR/r4-firmware-update.XXXXXX")" || {
+    fail "unable to create temporary mountpoint"
+    exit 1
+}
+"$MOUNT" -o rw,nodev,nosuid,noexec "$BOOT_DEVICE" "$MOUNTPOINT" || {
+    fail "unable to mount the identified RPI-RP2 bootloader"
+    exit 1
+}
+MOUNTED=1
+
+destination="$MOUNTPOINT/$(basename "$UF2_FILE")"
+if ! timeout "$COPY_TIMEOUT" "$CP" "$UF2_FILE" "$destination"; then
+    fail "UF2 copy failed or timed out"
+    exit 1
+fi
+"$SYNC" || {
+    fail "sync failed after UF2 copy"
+    exit 1
+}
+"$UMOUNT" "$MOUNTPOINT" >/dev/null 2>&1 || {
+    [ ! -e "$BOOT_DEVICE" ] || {
+        fail "unable to unmount RPI-RP2"
+        exit 1
+    }
+}
+MOUNTED=0
+rmdir "$MOUNTPOINT" >/dev/null 2>&1 || true
+MOUNTPOINT=""
+
+wait_for_bootloader_to_leave || exit 1
+wait_for_controller || exit 1
+
+verified_response="$(R4_ECCTL_DIRECT=1 "$ECCTL" VERSION 2>/dev/null)" || {
+    fail "controller returned but VERSION query failed"
+    exit 1
+}
+expected_response="R4_CONTROLLER_FW $TARGET_VERSION"
+[ "$verified_response" = "$expected_response" ] || {
+    fail "version mismatch after update: expected '$expected_response', got '$verified_response'"
+    exit 1
+}
+
+R4_ECCTL_DIRECT=1 "$ECCTL" LED FLASH 0 32 0 1200 >/dev/null 2>&1 || true
+"$SERVICES" start R4Controller >/dev/null 2>&1 || {
+    fail "firmware is updated, but R4Controller service failed to restart"
+    exit 1
+}
+SERVICE_STOPPED=0
+
+echo "Firmware update completed: $verified_response"
+exit 0

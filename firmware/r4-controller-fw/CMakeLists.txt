@@ -8,7 +8,8 @@ include(pico_sdk_import.cmake)
 
 project(r4-controller-fw C CXX ASM)
 
-set(R4_FIRMWARE_VERSION "0.10.0")
+set(R4_FIRMWARE_VERSION "0.12.0")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 option(
     R4_ENABLE_TEST_INPUT
@@ -21,6 +22,25 @@ configure_file(
     version.h
     @ONLY
 )
+
+# The Pico Windows bundle already ships matching host tools. Import them when
+# their explicit paths are supplied so CMake does not require a native C++
+# toolchain merely to rebuild pioasm/picotool.
+if(DEFINED ENV{PICO_PIOASM_PATH} AND NOT TARGET pioasm)
+    add_executable(pioasm IMPORTED GLOBAL)
+    set_property(
+        TARGET pioasm
+        PROPERTY IMPORTED_LOCATION "$ENV{PICO_PIOASM_PATH}"
+    )
+endif()
+
+if(DEFINED ENV{PICO_PICOTOOL_PATH} AND NOT TARGET picotool)
+    add_executable(picotool IMPORTED GLOBAL)
+    set_property(
+        TARGET picotool
+        PROPERTY IMPORTED_LOCATION "$ENV{PICO_PICOTOOL_PATH}"
+    )
+endif()
 
 pico_sdk_init()
 
@@ -35,6 +55,7 @@ add_executable(r4-controller-fw
     core/r4_input_source.c
     core/r4_protocol.c
     core/r4_service_buttons.c
+    core/r4_update.c
 )
 
 pico_generate_pio_header(
@@ -65,6 +86,8 @@ target_include_directories(
 target_link_libraries(
     r4-controller-fw
     pico_stdlib
+    pico_bootrom
+    pico_rand
     hardware_adc
     hardware_pio
     hardware_clocks
@@ -78,3 +101,19 @@ target_compile_definitions(
 )
 
 pico_add_extra_outputs(r4-controller-fw)
+
+add_custom_target(
+    r4-controller-fw-release
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_LIST_DIR}/tools/package_release.py
+        --uf2
+        ${CMAKE_CURRENT_BINARY_DIR}/r4-controller-fw.uf2
+        --version
+        ${R4_FIRMWARE_VERSION}
+        --output-dir
+        ${CMAKE_CURRENT_BINARY_DIR}/release
+    DEPENDS r4-controller-fw
+    COMMENT "Packaging versioned UF2, manifest and SHA-256"
+    VERBATIM
+)

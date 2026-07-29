@@ -135,7 +135,19 @@ sync_game_card_state() {
         return 0
 
     case "$game_card_state" in
-        INSERTED|READY|BUSY|EJECTED|ERROR)
+        EJECTED)
+            if [ -f "$(dirname "$GAME_CARD_STATE_FILE")/present" ]; then
+                game_card_present=1
+            else
+                game_card_present=0
+            fi
+            controller_command \
+                HOST CARD STATE=EJECTED \
+                "PRESENT=$game_card_present" \
+                >/dev/null 2>&1 ||
+                true
+            ;;
+        INSERTED|READY|BUSY|ERROR)
             controller_command HOST CARD "STATE=$game_card_state" \
                 >/dev/null 2>&1 ||
                 true
@@ -369,6 +381,11 @@ capture_clip() {
         clip_output="$("$REPLAY" save "$clip_sequence" 2>&1)"
         clip_status=$?
         case "$clip_status:$clip_output" in
+            0:DISABLED)
+                log_message \
+                    "Capture long event seq=$clip_sequence result=IGNORED detail=experimental-replay-disabled"
+                return 0
+                ;;
             0:ACCEPTED)
                 controller_command \
                     HOST CAPTURE TYPE=CLIP STATUS=SAVING \

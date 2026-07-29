@@ -13,6 +13,7 @@ add_library(
     ../core/r4_input_source.c
     ../core/r4_protocol.c
     ../core/r4_service_buttons.c
+    ../core/r4_update.c
 )
 
 target_include_directories(

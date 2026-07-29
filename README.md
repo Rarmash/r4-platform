@@ -8,14 +8,19 @@ The current primary hardware target is a custom Batocera-based handheld console 
 
 The handheld prototype currently has a working composite USB HID and CDC controller with two analog sticks, D-pad, ABXY, L1/R1, left and right stick switches (commonly called L3/R3), Start, Select and the R4 system button, which Batocera/RetroArch uses as its Hotkey. Automatic stick calibration, RGB status indication, reconnect handling, game lifecycle hooks and physical RetroAchievements feedback are implemented.
 
-Firmware `0.10.0` adds distinct screenshot/replay OLED feedback and a
-non-intrusive replay-ready indicator. The Batocera side keeps a bounded
-30-second segmented replay buffer while a supported game is running:
-Capture SHORT makes one screenshot and Capture LONG finalizes the preceding
-clip. R4 Game Card now uses one filesystem with a read-only ROM view and
-writable screenshot/video views. Capture SHORT is hardware-verified through
-the service test path; replay performance, the physical Capture input, SD
-reader/card, external ADC and physical OLED are not yet hardware-verified.
+Firmware `0.12.0` provides the current controller and OLED behavior plus a
+two-step transition to the RP2040 ROM USB bootloader. R4 Batocera integration
+`0.12.0` adds a guarded host-assisted USB firmware update command. It keeps
+Capture SHORT screenshots fully supported
+but disables Instant Replay by default. Software H.264 capture on the Orange Pi
+3 LTS cannot sustain useful gameplay frame rates and heavily loads all four
+Cortex-A53 cores, so replay remains available only as an explicitly enabled
+experimental developer feature. Capture LONG is ignored in the normal
+configuration. R4 Game Card uses one filesystem with a read-only ROM view and
+writable screenshot/video views. The exFAT Game Card, read-only ROM view,
+writable capture views, BUSY protection and safe eject are verified on
+Batocera 40; the physical Capture input, external ADC and physical OLED are not
+yet hardware-verified.
 
 The Batocera integration can be installed and updated automatically. The complete controller layout, gameplay path and RetroAchievements indication have been verified on hardware.
 
@@ -130,10 +135,10 @@ See the [controller firmware README](firmware/r4-controller-fw/README.md) for pi
 ## Batocera integration
 
 The Batocera integration discovers and monitors the controller, validates its
-firmware version, recovers from USB reconnects, handles screenshot and previous
-gameplay capture, publishes safe ROM/capture views from one removable Game Card
-filesystem, maintains persistent LED states and connects game and
-RetroAchievements events to temporary LED effects.
+firmware version, recovers from USB reconnects, handles supported screenshots
+and retains an opt-in experimental replay path, publishes safe ROM/capture
+views from one removable Game Card filesystem, maintains persistent LED states
+and connects game and RetroAchievements events to temporary LED effects.
 
 See the [Batocera integration README](integration/batocera/README.md) for installation, controller configuration, service operation and diagnostics.
 

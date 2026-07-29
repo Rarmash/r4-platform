@@ -1,9 +1,8 @@
 # R4 Controller Firmware
 
-RP2040 firmware for the R4 handheld controller. Development version
-`0.10.0` keeps the `0.8.0` USB HID behavior and extends bounded host
-feedback for screenshots, previous-game replay and the software-managed
-R4 Game Card.
+RP2040 firmware for the R4 handheld controller. Version `0.12.0` keeps the
+existing HID report and CDC commands and adds a guarded transition to the
+RP2040 ROM USB bootloader for host-assisted USB firmware updates.
 
 The [Batocera integration](../../integration/batocera/README.md) owns host-side
 discovery and lifecycle events. The [root README](../../README.md) describes the
@@ -35,6 +34,7 @@ under `core/` and has no Pico SDK dependency:
   GPIO expander and mock sources;
 - `r4_protocol` — bounded text-protocol parser and response formatting;
 - `r4_service_buttons` — debounced short/long/double gesture recognizer;
+- `r4_update` — one-time, expiring ARM/CONFIRM update gate;
 - `r4_display` — OLED state model and monochrome framebuffer renderer.
 
 `rp2040_input.c` is the only layer that knows the current pins and built-in ADC
@@ -140,10 +140,14 @@ cmake -S ./firmware/r4-controller-fw `
   -B ./firmware/r4-controller-fw/build `
   -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build ./firmware/r4-controller-fw/build
+cmake --build ./firmware/r4-controller-fw/build `
+  --target r4-controller-fw-release
 ```
 
 On another machine, point `PICO_SDK_PATH` at its installed SDK. The flashable
-artifact is `build/r4-controller-fw.uf2`.
+artifact is `build/r4-controller-fw.uf2`. The release target also writes a
+versioned UF2, manifest and checksum under `build/release/`; keep all three
+files together for the Batocera updater.
 
 The test-input commands are compile-time disabled by default. For a deliberately
 test-only image:
@@ -170,7 +174,7 @@ The stable commands still work:
 | Command | Response |
 |---|---|
 | `PING` | `PONG` |
-| `VERSION` | `R4_CONTROLLER_FW 0.10.0` |
+| `VERSION` | `R4_CONTROLLER_FW 0.12.0` |
 | `INPUT` | existing fields followed by `LT`, `RT`, `LT_STATUS`, `RT_STATUS` |
 | `STATUS` | existing firmware/LED/input fields followed by trigger fields |
 | `LED R G B` | `OK LED R G B` |
@@ -178,12 +182,34 @@ The stable commands still work:
 | `LED OFF` | `OK LED OFF` |
 | `FRAMEBUFFER INFO` | freeze and describe a rendered OLED snapshot |
 | `FRAMEBUFFER CHUNK ID=n OFFSET=n LENGTH=n` | read one packed snapshot chunk |
+| `UPDATE ARM` | `UPDATE ARMED TOKEN=........ TTL_MS=10000` |
+| `UPDATE STATUS` | `UPDATE STATUS IDLE` or expiring `ARMED` status |
+| `UPDATE CONFIRM TOKEN` | final `OK UPDATE BOOTLOADER`, then delayed ROM reboot |
 | `HOST HEARTBEAT` | `OK HOST HEARTBEAT` |
 | `HOST CAPTURE STATUS=BUSY\|SAVED\|ERROR` | `OK HOST CAPTURE` (legacy screenshot form) |
 | `HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY\|SAVED\|ERROR` | `OK HOST CAPTURE` |
 | `HOST CAPTURE TYPE=CLIP STATUS=BUFFERING\|SAVING\|SAVED\|ERROR\|UNAVAILABLE` | `OK HOST CAPTURE` |
 | `HOST CARD STATE=INSERTED\|READY\|BUSY\|EJECTED\|ERROR` | `OK HOST CARD` |
+| `HOST CARD STATE=EJECTED PRESENT=0\|1` | update absent/safe-to-remove distinction |
 | `HELP` | command summary |
+
+### Host-assisted USB firmware update gate
+
+This is not OTA. `UPDATE ARM` creates a random one-time token valid for ten
+seconds. Only an exact `UPDATE CONFIRM <token>` within that window schedules a
+reset. A wrong, expired or already-used token does not reset the controller.
+The final response is flushed before a short deferred call to the Pico SDK
+`reset_usb_boot()` BOOTROM API. `UPDATE STATUS` is read-only diagnostics.
+
+The existing notification overlay shows `UPDATE ARMED` and then `USB UPDATE`;
+the existing temporary LED mechanism shows amber while armed and purple while
+transitioning. No parallel display or LED state machine is introduced.
+
+The ROM bootloader remains available through physical BOOTSEL even if
+application firmware is damaged. It has no rollback facility. Firmware
+`0.11.1` does not implement the update gate, so installing `0.12.0` over
+`0.11.1` requires one final physical BOOTSEL copy. Later compatible releases
+can use the Batocera host-assisted flow.
 
 Example production input without trigger hardware:
 
@@ -205,6 +231,8 @@ HOST CAPTURE TYPE=CLIP STATUS=BUFFERING
 HOST CAPTURE TYPE=CLIP STATUS=SAVING
 HOST CAPTURE TYPE=CLIP STATUS=SAVED
 HOST CARD STATE=READY
+HOST CARD STATE=EJECTED PRESENT=1
+HOST CARD STATE=EJECTED PRESENT=0
 HOST HEARTBEAT
 HOST TELEMETRY BATTERY=78 RUNTIME_MIN=155 VOLUME=65 POWER=BATTERY NETWORK=UP TEMP_MILLIC=42125 TIME_HEX=31323a3334
 ```
@@ -243,14 +271,20 @@ Extra capability fields can be added
 without redefining existing ones; no adaptive-trigger mechanism is implemented.
 
 The 128x64 profile uses a readable 5x7 uppercase ASCII font. Its top status bar
-shows time, external/battery power, charge percentage and estimated runtime.
-Home identifies the device as `R4 BATOCERA` and shows firmware version,
-RetroAchievements, volume and the latest Game Card state. The game footer
-replaces firmware version with a session timer; long game titles wrap onto a
-second line. While Batocera reports an active replay ring, the game screen
-shows a small `RPL` marker. Temperature remains available on the diagnostic
-screen. Screenshot, clip and Game Card changes use a reusable 2.5-second
-notification over the bottom area. Clip states are `CLIP SAVING`,
+shows time plus battery/external power, charge percentage and estimated
+runtime. The compact bottom bar shows a stateful Game Card icon and the sound
+level as `VOL1` through `VOL100`, `MUTE` at zero, or `VOL--` when unavailable.
+Home identifies the device as `R4 BATOCERA`
+and keeps RetroAchievements status in the content area. Permanent Home and
+game screens do not show the firmware version; `0.12.0` appears only on boot
+and diagnostic screens. Long game titles wrap onto a second line, while the
+session timer and optional `RPL` marker remain above the footer.
+
+Game Card indicators distinguish absent, inserted, ready, busy,
+safe-to-remove and error. `HOST CARD STATE=EJECTED PRESENT=1` displays
+`SAFE TO REMOVE`; `PRESENT=0` changes the persistent icon to absent without
+starting another popup. Screenshot, clip and Game Card changes use a reusable
+2.5-second notification over the bottom area. Clip states are `CLIP SAVING`,
 `CLIP SAVED`, `CLIP ERROR` and `CLIP UNAVAILABLE`; `BUFFERING` changes only
 the unobtrusive marker. An achievement keeps priority over that notification
 and is hidden by firmware after five seconds, after which the underlying screen
@@ -316,7 +350,7 @@ Use the normal Pico SDK build described above and flash:
 firmware/r4-controller-fw/build/r4-controller-fw.uf2
 ```
 
-The connected board must answer `R4_CONTROLLER_FW 0.10.0` and support
+The connected board must answer `R4_CONTROLLER_FW 0.12.0` and support
 `FRAMEBUFFER INFO`. This feature is available in the normal production build;
 `R4_ENABLE_TEST_INPUT` is not required.
 
@@ -463,7 +497,8 @@ USB input, reconnects or a live RP2040 and are not the primary validation mode.
 ## Headless snapshots and host tests
 
 The portable suite tests analog normalization, mock sources, HID packing, CDC
-parsing/formatting, virtual-time button gestures and display snapshots:
+parsing/formatting, the expiring one-time update gate, virtual-time button
+gestures and display snapshots:
 
 ```sh
 cmake -S firmware/r4-controller-fw/tests \

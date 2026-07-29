@@ -116,6 +116,15 @@ r4_parse_status_t r4_protocol_parse(
         command->type = R4_COMMAND_EVENT_NEXT;
     } else if (strcmp(text, "FRAMEBUFFER INFO") == 0) {
         command->type = R4_COMMAND_FRAMEBUFFER_INFO;
+    } else if (strcmp(text, "UPDATE ARM") == 0) {
+        command->type = R4_COMMAND_UPDATE_ARM;
+    } else if (strcmp(text, "UPDATE STATUS") == 0) {
+        command->type = R4_COMMAND_UPDATE_STATUS;
+    } else if (strncmp(text, "UPDATE CONFIRM ", 15) == 0) {
+        command->type = R4_COMMAND_UPDATE_CONFIRM;
+        if (!copy_payload(command, text + 15)) {
+            return R4_PARSE_TOO_LONG;
+        }
     } else if (strncmp(text, "FRAMEBUFFER CHUNK ", 18) == 0) {
         command->type = R4_COMMAND_FRAMEBUFFER_CHUNK;
         if (!copy_payload(command, text + 18)) {
@@ -226,6 +235,14 @@ r4_parse_status_t r4_protocol_parse(
             strcmp(text, "HOST CARD STATE=READY") != 0 &&
             strcmp(text, "HOST CARD STATE=BUSY") != 0 &&
             strcmp(text, "HOST CARD STATE=EJECTED") != 0 &&
+            strcmp(
+                text,
+                "HOST CARD STATE=EJECTED PRESENT=0"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CARD STATE=EJECTED PRESENT=1"
+            ) != 0 &&
             strcmp(text, "HOST CARD STATE=ERROR") != 0
         ) {
             return R4_PARSE_INVALID_VALUE;

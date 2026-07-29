@@ -9,14 +9,24 @@ FFMPEG="${R4_FFMPEG:-ffmpeg}"
 FFPROBE="${R4_FFPROBE:-ffprobe}"
 SCREENSHOT="${R4_BATOCERA_SCREENSHOT:-batocera-screenshot}"
 DF="${R4_DF:-df}"
+FUSER="${R4_FUSER:-fuser}"
+READY_CHECK="${R4_REPLAY_READY_CHECK:-}"
+PROC_ROOT="${R4_PROC_ROOT:-/proc}"
+SYS_CLASS_DRM="${R4_SYS_CLASS_DRM:-/sys/class/drm}"
+SYS_CLASS_GRAPHICS="${R4_SYS_CLASS_GRAPHICS:-/sys/class/graphics}"
 LOG_FILE="${R4_REPLAY_LOG:-$R4_DATA_DIR/r4-replay.log}"
 
 PID_FILE="$R4_REPLAY_STATE_DIR/encoder.pid"
 MONITOR_PID_FILE="$R4_REPLAY_STATE_DIR/monitor.pid"
+WAITER_PID_FILE="$R4_REPLAY_STATE_DIR/waiter.pid"
 STATUS_FILE="$R4_REPLAY_STATE_DIR/status"
 SYSTEM_FILE="$R4_REPLAY_STATE_DIR/system"
 GAME_FILE="$R4_REPLAY_STATE_DIR/game"
 ROM_FILE="$R4_REPLAY_STATE_DIR/rom"
+REQUEST_FILE="$R4_REPLAY_STATE_DIR/request"
+SESSION_FILE="$R4_REPLAY_STATE_DIR/session"
+DRM_BASELINE_FILE="$R4_REPLAY_STATE_DIR/drm-baseline"
+CONTROL_LOCK="$R4_REPLAY_STATE_DIR/control.lock"
 SAVE_LOCK="$R4_REPLAY_STATE_DIR/save.lock"
 STOP_REQUEST="$R4_REPLAY_STATE_DIR/stop-request"
 
@@ -83,6 +93,10 @@ load_config() {
     R4_CAPTURE_FALLBACK_INTERNAL=""
     R4_CAPTURE_INTERNAL_SCREENSHOTS=""
     R4_CAPTURE_INTERNAL_VIDEOS=""
+    R4_REPLAY_DRM_DEVICE="/dev/dri/card0"
+    R4_REPLAY_READY_TIMEOUT_SECONDS=20
+    R4_REPLAY_READY_POLL_MS=250
+    R4_REPLAY_READY_STABLE_POLLS=4
 
     [ -f "$CONFIG_FILE" ] ||
         fail "configuration is missing: $CONFIG_FILE" ||
@@ -122,6 +136,14 @@ load_config() {
                 R4_CAPTURE_INTERNAL_SCREENSHOTS="${config_line#*=}" ;;
             R4_CAPTURE_INTERNAL_VIDEOS=*)
                 R4_CAPTURE_INTERNAL_VIDEOS="${config_line#*=}" ;;
+            R4_REPLAY_DRM_DEVICE=*)
+                R4_REPLAY_DRM_DEVICE="${config_line#*=}" ;;
+            R4_REPLAY_READY_TIMEOUT_SECONDS=*)
+                R4_REPLAY_READY_TIMEOUT_SECONDS="${config_line#*=}" ;;
+            R4_REPLAY_READY_POLL_MS=*)
+                R4_REPLAY_READY_POLL_MS="${config_line#*=}" ;;
+            R4_REPLAY_READY_STABLE_POLLS=*)
+                R4_REPLAY_READY_STABLE_POLLS="${config_line#*=}" ;;
             ''|'#'*) ;;
             *)
                 fail "invalid configuration entry: $config_line"
@@ -156,6 +178,12 @@ load_config() {
         "$R4_REPLAY_VIDEO_BITRATE" 250000 20000000 || return 1
     integer_in_range R4_CAPTURE_MIN_FREE_MB \
         "$R4_CAPTURE_MIN_FREE_MB" 1 1048576 || return 1
+    integer_in_range R4_REPLAY_READY_TIMEOUT_SECONDS \
+        "$R4_REPLAY_READY_TIMEOUT_SECONDS" 1 120 || return 1
+    integer_in_range R4_REPLAY_READY_POLL_MS \
+        "$R4_REPLAY_READY_POLL_MS" 50 2000 || return 1
+    integer_in_range R4_REPLAY_READY_STABLE_POLLS \
+        "$R4_REPLAY_READY_STABLE_POLLS" 1 20 || return 1
 
     case "$R4_REPLAY_VIDEO_PRESET" in
         ultrafast|superfast|veryfast) ;;
@@ -184,6 +212,20 @@ load_config() {
         "$R4_CAPTURE_INTERNAL_SCREENSHOTS" || return 1
     validate_directory R4_CAPTURE_INTERNAL_VIDEOS \
         "$R4_CAPTURE_INTERNAL_VIDEOS" || return 1
+    drm_device_index="${R4_REPLAY_DRM_DEVICE#/dev/dri/card}"
+    case "$R4_REPLAY_DRM_DEVICE:$drm_device_index" in
+        /dev/dri/card*:[0-9]*) ;;
+        *)
+            fail "R4_REPLAY_DRM_DEVICE must be a DRM card device"
+            return 1
+            ;;
+    esac
+    case "$drm_device_index" in
+        *[!0-9]*)
+            fail "R4_REPLAY_DRM_DEVICE must be a DRM card device"
+            return 1
+            ;;
+    esac
 
     case "$R4_REPLAY_BUFFER_DIR" in
         /|/tmp|/userdata|/userdata/system)
@@ -198,6 +240,14 @@ load_config() {
         R4_REPLAY_SEGMENT_SECONDS - 1
     ) / R4_REPLAY_SEGMENT_SECONDS))
     REPLAY_WRAP_COUNT=$((REPLAY_SEGMENT_COUNT + 2))
+    READY_MAX_POLLS=$(((
+        R4_REPLAY_READY_TIMEOUT_SECONDS * 1000 +
+        R4_REPLAY_READY_POLL_MS - 1
+    ) / R4_REPLAY_READY_POLL_MS))
+    READY_POLL_DELAY="$(
+        awk -v milliseconds="$R4_REPLAY_READY_POLL_MS" \
+            'BEGIN { printf "%.3f", milliseconds / 1000 }'
+    )"
 }
 
 set_status() {
@@ -219,6 +269,82 @@ read_value() {
     fi
 }
 
+to_hex() {
+    printf '%s' "$1" |
+        od -An -tx1 |
+        tr -d ' \n'
+}
+
+request_key() {
+    printf '%s|%s|%s\n' \
+        "$(to_hex "$1")" \
+        "$(to_hex "$2")" \
+        "$(to_hex "$3")"
+}
+
+new_session_id() {
+    if [ -r "$PROC_ROOT/sys/kernel/random/uuid" ]; then
+        sed -n '1p' "$PROC_ROOT/sys/kernel/random/uuid"
+    else
+        printf '%s-%s\n' "$(date +%s)" "$$"
+    fi
+}
+
+session_is_current() {
+    [ -n "$1" ] &&
+        [ "$(read_value "$SESSION_FILE")" = "$1" ]
+}
+
+pid_file_is_running() {
+    [ -f "$1" ] || return 1
+    tracked_pid="$(read_value "$1")"
+    case "$tracked_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$tracked_pid" 2>/dev/null
+}
+
+clear_pid_if_owned() {
+    owned_file="$1"
+    owned_pid="$2"
+    [ "$(read_value "$owned_file")" = "$owned_pid" ] ||
+        return 0
+    rm -f "$owned_file"
+}
+
+acquire_control_lock() {
+    mkdir -p "$R4_REPLAY_STATE_DIR" || return 1
+    lock_attempt=0
+
+    while ! mkdir "$CONTROL_LOCK" 2>/dev/null; do
+        lock_pid="$(read_value "$CONTROL_LOCK/pid")"
+        if [ -z "$lock_pid" ]; then
+            lock_attempt=$((lock_attempt + 1))
+            if [ "$lock_attempt" -ge 10 ]; then
+                rm -rf "$CONTROL_LOCK"
+            else
+                sleep 0.05
+            fi
+            continue
+        fi
+        if ! kill -0 "$lock_pid" 2>/dev/null; then
+            rm -rf "$CONTROL_LOCK"
+            continue
+        fi
+        lock_attempt=$((lock_attempt + 1))
+        [ "$lock_attempt" -lt 100 ] || return 1
+        sleep 0.05
+    done
+
+    printf '%s\n' "$$" > "$CONTROL_LOCK/pid"
+}
+
+release_control_lock() {
+    [ "$(read_value "$CONTROL_LOCK/pid")" = "$$" ] ||
+        return 0
+    rm -rf "$CONTROL_LOCK"
+}
+
 sanitize_name() {
     sanitized="$(
         printf '%s' "$1" |
@@ -233,7 +359,13 @@ sanitize_name() {
 
 backend_available() {
     command -v "$FFMPEG" >/dev/null 2>&1 &&
-        [ -e /dev/dri/card0 -o "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ]
+        {
+            [ "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ] ||
+                {
+                    command -v "$FUSER" >/dev/null 2>&1 &&
+                        [ -e "$R4_REPLAY_DRM_DEVICE" ]
+                }
+        }
 }
 
 system_disabled() {
@@ -245,10 +377,124 @@ system_disabled() {
 }
 
 encoder_is_running() {
-    [ -f "$PID_FILE" ] || return 1
-    encoder_pid="$(cat "$PID_FILE" 2>/dev/null)"
-    [ -n "$encoder_pid" ] &&
-        kill -0 "$encoder_pid" 2>/dev/null
+    pid_file_is_running "$PID_FILE" || return 1
+    encoder_pid="$tracked_pid"
+}
+
+waiter_is_running() {
+    pid_file_is_running "$WAITER_PID_FILE" || return 1
+    waiter_pid="$tracked_pid"
+}
+
+drm_holder_identities() {
+    if [ "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ] &&
+       [ "${R4_REPLAY_TEST_DRM_HOLDERS:-0}" != "1" ]; then
+        return 0
+    fi
+
+    for holder_pid in $(
+        "$FUSER" "$R4_REPLAY_DRM_DEVICE" 2>/dev/null
+    ); do
+        case "$holder_pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ -r "$PROC_ROOT/$holder_pid/stat" ] || continue
+        holder_start="$(
+            sed 's/^[^)]*) //' "$PROC_ROOT/$holder_pid/stat" 2>/dev/null |
+                awk '{ print $20 }'
+        )"
+        [ -n "$holder_start" ] || continue
+        printf '%s:%s\n' "$holder_pid" "$holder_start"
+    done
+}
+
+capture_drm_baseline() {
+    drm_holder_identities |
+        sort -u > "$DRM_BASELINE_FILE"
+}
+
+drm_framebuffer_usable() {
+    if [ "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ]; then
+        FRAMEBUFFER_DETAIL=test-framebuffer
+        return 0
+    fi
+
+    drm_card_name="$(basename "$R4_REPLAY_DRM_DEVICE")"
+    connector_ready=0
+    for connector_enabled in \
+        "$SYS_CLASS_DRM"/"$drm_card_name"-*/enabled; do
+        [ -r "$connector_enabled" ] || continue
+        [ "$(read_value "$connector_enabled")" = "enabled" ] ||
+            continue
+        connector_status="${connector_enabled%/enabled}/status"
+        [ ! -r "$connector_status" ] ||
+            [ "$(read_value "$connector_status")" = "connected" ] ||
+            continue
+        connector_ready=1
+        break
+    done
+    [ "$connector_ready" -eq 1 ] || return 1
+
+    for virtual_size_file in \
+        "$SYS_CLASS_GRAPHICS"/fb*/virtual_size; do
+        [ -r "$virtual_size_file" ] || continue
+        framebuffer_size="$(read_value "$virtual_size_file")"
+        case "$framebuffer_size" in
+            0,*|*,0|''|*[!0-9,]*) continue ;;
+        esac
+        framebuffer_state_file="${virtual_size_file%/virtual_size}/state"
+        [ ! -r "$framebuffer_state_file" ] ||
+            [ "$(read_value "$framebuffer_state_file")" = "0" ] ||
+            continue
+        FRAMEBUFFER_DETAIL="framebuffer=$framebuffer_size"
+        return 0
+    done
+
+    return 1
+}
+
+drm_session_ready() {
+    READY_DETAIL=""
+
+    if [ -n "$READY_CHECK" ]; then
+        ready_output="$(
+            "$READY_CHECK" \
+                "$1" \
+                "$R4_REPLAY_DRM_DEVICE" \
+                "$DRM_BASELINE_FILE" \
+                2>/dev/null
+        )" || return 1
+        READY_DETAIL="${ready_output:-external-check}"
+        return 0
+    fi
+
+    if [ "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ] &&
+       [ "${R4_REPLAY_TEST_DRM_HOLDERS:-0}" != "1" ]; then
+        READY_DETAIL=test-backend
+        return 0
+    fi
+
+    current_holders="$(
+        drm_holder_identities
+    )"
+    [ -n "$current_holders" ] || return 1
+
+    new_holder_identity=""
+    while IFS= read -r holder_identity; do
+        [ -n "$holder_identity" ] || continue
+        if ! grep -Fqx "$holder_identity" "$DRM_BASELINE_FILE" \
+            2>/dev/null; then
+            new_holder_identity="$holder_identity"
+            break
+        fi
+    done <<EOF
+$current_holders
+EOF
+
+    [ -n "$new_holder_identity" ] || return 1
+    drm_framebuffer_usable || return 1
+    READY_DETAIL="new-drm-holder=$new_holder_identity device=$R4_REPLAY_DRM_DEVICE $FRAMEBUFFER_DETAIL"
+    return 0
 }
 
 feedback() {
@@ -307,13 +553,37 @@ trim_buffer() {
 
 monitor_encoder() {
     watched_pid="$1"
+    watched_session="$2"
+
     while kill -0 "$watched_pid" 2>/dev/null; do
+        if ! session_is_current "$watched_session"; then
+            log_message \
+                "stale replay monitor session=$watched_session pid=$watched_pid action=terminate-encoder"
+            kill "$watched_pid" 2>/dev/null || true
+            break
+        fi
         trim_buffer
         sleep "$R4_REPLAY_SEGMENT_SECONDS"
     done
+
+    acquire_control_lock || return 0
+    if [ "$(read_value "$PID_FILE")" = "$watched_pid" ]; then
+        rm -f "$PID_FILE"
+        if session_is_current "$watched_session"; then
+            set_status UNAVAILABLE
+            rm -f "$SESSION_FILE"
+            log_message \
+                "replay unavailable reason=encoder-exited session=$watched_session pid=$watched_pid"
+        fi
+    fi
+    clear_pid_if_owned "$MONITOR_PID_FILE" "$$"
+    release_control_lock
 }
 
 launch_encoder() {
+    launch_session="$1"
+    session_is_current "$launch_session" || return 1
+
     mkdir -p "$R4_REPLAY_STATE_DIR" "$BUFFER_CURRENT" ||
         return 1
     rm -f "$BUFFER_CURRENT"/segment-*.ts
@@ -326,7 +596,9 @@ launch_encoder() {
         nohup "$FFMPEG" \
             -hide_banner -loglevel warning -nostdin -y \
             -thread_queue_size 512 \
-            -f kmsgrab -framerate "$R4_REPLAY_FPS" -i - \
+            -f kmsgrab \
+            -device "$R4_REPLAY_DRM_DEVICE" \
+            -framerate "$R4_REPLAY_FPS" -i - \
             -thread_queue_size 512 \
             -f pulse -i @DEFAULT_MONITOR@ \
             -map 0:v:0 -map 1:a:0 \
@@ -342,6 +614,7 @@ launch_encoder() {
             -sc_threshold 0 \
             -af aresample=async=1:first_pts=0 \
             -c:a aac -b:a 128k \
+            -vsync 0 \
             -f segment \
             -segment_time "$R4_REPLAY_SEGMENT_SECONDS" \
             -segment_time_delta 0.05 \
@@ -353,7 +626,9 @@ launch_encoder() {
         nohup "$FFMPEG" \
             -hide_banner -loglevel warning -nostdin -y \
             -thread_queue_size 512 \
-            -f kmsgrab -framerate "$R4_REPLAY_FPS" -i - \
+            -f kmsgrab \
+            -device "$R4_REPLAY_DRM_DEVICE" \
+            -framerate "$R4_REPLAY_FPS" -i - \
             -map 0:v:0 \
             -vf "$video_filter" \
             -c:v libx264 \
@@ -366,6 +641,7 @@ launch_encoder() {
             -keyint_min "$gop_size" \
             -sc_threshold 0 \
             -an \
+            -vsync 0 \
             -f segment \
             -segment_time "$R4_REPLAY_SEGMENT_SECONDS" \
             -segment_time_delta 0.05 \
@@ -377,18 +653,45 @@ launch_encoder() {
 
     encoder_pid=$!
     printf '%s\n' "$encoder_pid" > "$PID_FILE"
+    log_message \
+        "ffmpeg launched session=$launch_session pid=$encoder_pid backend=ffmpeg-kms-pulse"
     launch_check=0
     while [ "$launch_check" -lt 4 ]; do
         sleep 0.5
         if ! kill -0 "$encoder_pid" 2>/dev/null; then
             rm -f "$PID_FILE"
+            log_message \
+                "replay launch refused reason=encoder-exited-early session=$launch_session pid=$encoder_pid"
+            return 1
+        fi
+        if ! session_is_current "$launch_session"; then
+            kill "$encoder_pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            log_message \
+                "stale replay session=$launch_session action=terminate-encoder pid=$encoder_pid"
             return 1
         fi
         launch_check=$((launch_check + 1))
     done
 
-    "$0" monitor "$encoder_pid" >/dev/null 2>&1 &
+    "$0" monitor "$encoder_pid" "$launch_session" >/dev/null 2>&1 &
     printf '%s\n' "$!" > "$MONITOR_PID_FILE"
+}
+
+stop_waiter() {
+    if waiter_is_running; then
+        kill "$waiter_pid" 2>/dev/null || true
+        waiter_stop_attempt=0
+        while kill -0 "$waiter_pid" 2>/dev/null; do
+            waiter_stop_attempt=$((waiter_stop_attempt + 1))
+            if [ "$waiter_stop_attempt" -ge 50 ]; then
+                kill -9 "$waiter_pid" 2>/dev/null || true
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+    rm -f "$WAITER_PID_FILE"
 }
 
 stop_encoder() {
@@ -401,6 +704,7 @@ stop_encoder() {
     rm -f "$MONITOR_PID_FILE"
 
     if encoder_is_running; then
+        log_message "stopping ffmpeg pid=$encoder_pid"
         kill "$encoder_pid" 2>/dev/null || true
         stop_attempt=0
         while kill -0 "$encoder_pid" 2>/dev/null; do
@@ -415,55 +719,202 @@ stop_encoder() {
     rm -f "$PID_FILE"
 }
 
+wait_for_replay_ready() {
+    wait_session="$1"
+    stable_polls=0
+    wait_poll=0
+
+    waiter_signal() {
+        clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+        exit 0
+    }
+    trap waiter_signal HUP INT TERM
+
+    log_message \
+        "replay wait started session=$wait_session timeout_s=$R4_REPLAY_READY_TIMEOUT_SECONDS poll_ms=$R4_REPLAY_READY_POLL_MS stable_polls=$R4_REPLAY_READY_STABLE_POLLS"
+
+    while [ "$wait_poll" -lt "$READY_MAX_POLLS" ]; do
+        if ! session_is_current "$wait_session"; then
+            log_message \
+                "stale replay session=$wait_session action=waiter-exit"
+            clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+            trap - HUP INT TERM
+            return 0
+        fi
+
+        if drm_session_ready "$wait_session"; then
+            stable_polls=$((stable_polls + 1))
+        else
+            stable_polls=0
+        fi
+
+        if [ "$stable_polls" -ge "$R4_REPLAY_READY_STABLE_POLLS" ]; then
+            acquire_control_lock || {
+                log_message \
+                    "replay launch refused reason=control-lock-timeout session=$wait_session"
+                clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+                return 1
+            }
+            if ! session_is_current "$wait_session"; then
+                release_control_lock
+                log_message \
+                    "stale replay session=$wait_session action=launch-refused"
+                clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+                trap - HUP INT TERM
+                return 0
+            fi
+
+            log_message \
+                "replay readiness detected session=$wait_session detail=$READY_DETAIL"
+            if launch_encoder "$wait_session"; then
+                set_status BUFFERING
+                feedback BUFFERING
+                log_message \
+                    "replay buffering session=$wait_session backend=ffmpeg-kms-pulse system=$(read_value "$SYSTEM_FILE") game=$(read_value "$GAME_FILE") seconds=$R4_REPLAY_SECONDS segment_seconds=$R4_REPLAY_SEGMENT_SECONDS fps=$R4_REPLAY_FPS max_width=$R4_REPLAY_MAX_WIDTH bitrate=$R4_REPLAY_VIDEO_BITRATE audio=$R4_REPLAY_AUDIO_ENABLED"
+            else
+                set_status UNAVAILABLE
+                rm -f "$SESSION_FILE"
+                log_message \
+                    "replay unavailable reason=encoder-start-failed session=$wait_session backend=ffmpeg-kms-pulse"
+            fi
+            clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+            release_control_lock
+            trap - HUP INT TERM
+            return 0
+        fi
+
+        wait_poll=$((wait_poll + 1))
+        sleep "$READY_POLL_DELAY"
+    done
+
+    acquire_control_lock || return 1
+    if session_is_current "$wait_session"; then
+        set_status UNAVAILABLE
+        rm -f "$SESSION_FILE"
+        log_message \
+            "replay readiness timeout session=$wait_session timeout_s=$R4_REPLAY_READY_TIMEOUT_SECONDS reason=no-stable-usable-drm-framebuffer"
+    else
+        log_message \
+            "stale replay session=$wait_session action=timeout-ignored"
+    fi
+    clear_pid_if_owned "$WAITER_PID_FILE" "$$"
+    release_control_lock
+    trap - HUP INT TERM
+}
+
 start_replay() {
+    requested_key="$(request_key "$1" "$2" "$3")"
     replay_system="$(sanitize_name "$1")"
     replay_rom="$(sanitize_name "$2")"
     replay_game="$(sanitize_name "$3")"
 
-    stop_encoder
-    rm -f "$STOP_REQUEST"
-    rm -rf "$R4_REPLAY_BUFFER_DIR"
-    mkdir -p "$BUFFER_CURRENT" "$R4_REPLAY_STATE_DIR" ||
+    acquire_control_lock ||
+        fail "unable to acquire replay control lock" ||
         return 1
-    printf '%s\n' "$replay_system" > "$SYSTEM_FILE"
-    printf '%s\n' "$replay_game" > "$GAME_FILE"
-    printf '%s\n' "$replay_rom" > "$ROM_FILE"
 
-    if [ "$R4_REPLAY_ENABLED" != "1" ] ||
-       system_disabled "$replay_system" ||
-       ! backend_available; then
-        set_status UNAVAILABLE
+    existing_key="$(read_value "$REQUEST_FILE")"
+    if [ "$existing_key" = "$requested_key" ] &&
+       { waiter_is_running || encoder_is_running; }; then
         log_message \
-            "replay unavailable backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
-        return 2
-    fi
-
-    if launch_encoder; then
-        set_status BUFFERING
-        feedback BUFFERING
-        log_message \
-            "replay buffering backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game seconds=$R4_REPLAY_SECONDS segment_seconds=$R4_REPLAY_SEGMENT_SECONDS fps=$R4_REPLAY_FPS max_width=$R4_REPLAY_MAX_WIDTH bitrate=$R4_REPLAY_VIDEO_BITRATE audio=$R4_REPLAY_AUDIO_ENABLED"
+            "replay start ignored reason=already-active session=$(read_value "$SESSION_FILE") system=$replay_system game=$replay_game"
+        release_control_lock
         return 0
     fi
 
-    set_status UNAVAILABLE
+    previous_session="$(read_value "$SESSION_FILE")"
+    rm -f "$SESSION_FILE"
+    if waiter_is_running; then
+        log_message \
+            "replay waiter superseded session=$previous_session pid=$waiter_pid"
+    fi
+    stop_waiter
+    stop_encoder
+    rm -f "$STOP_REQUEST"
+    rm -rf "$R4_REPLAY_BUFFER_DIR"
+
+    if [ "$R4_REPLAY_ENABLED" != "1" ]; then
+        mkdir -p "$R4_REPLAY_STATE_DIR" || {
+            release_control_lock
+            return 1
+        }
+        set_status DISABLED
+        log_message \
+            "experimental replay disabled reason=R4_REPLAY_ENABLED-is-not-1 system=$replay_system game=$replay_game"
+        release_control_lock
+        return 0
+    fi
+
+    if ! mkdir -p "$BUFFER_CURRENT" "$R4_REPLAY_STATE_DIR"; then
+        release_control_lock
+        return 1
+    fi
+    printf '%s\n' "$replay_system" > "$SYSTEM_FILE"
+    printf '%s\n' "$replay_game" > "$GAME_FILE"
+    printf '%s\n' "$replay_rom" > "$ROM_FILE"
+    printf '%s\n' "$requested_key" > "$REQUEST_FILE"
+
+    if system_disabled "$replay_system" ||
+       ! backend_available; then
+        set_status UNAVAILABLE
+        log_message \
+            "experimental replay unavailable reason=disabled-system-or-backend backend=ffmpeg-kms-pulse-experimental system=$replay_system game=$replay_game"
+        release_control_lock
+        return 2
+    fi
+
+    replay_session="$(new_session_id)"
+    printf '%s\n' "$replay_session" > "$SESSION_FILE"
+    capture_drm_baseline
+    set_status WAITING
     log_message \
-        "replay unavailable reason=encoder-start-failed backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
-    return 2
+        "experimental replay enabled warning=high-cpu-load-unsupported-hardware session=$replay_session system=$replay_system game=$replay_game"
+
+    nohup "$0" waiter "$replay_session" >/dev/null 2>&1 &
+    waiter_pid=$!
+    printf '%s\n' "$waiter_pid" > "$WAITER_PID_FILE"
+    if ! kill -0 "$waiter_pid" 2>/dev/null; then
+        rm -f "$WAITER_PID_FILE" "$SESSION_FILE"
+        set_status UNAVAILABLE
+        log_message \
+            "replay unavailable reason=waiter-start-failed session=$replay_session"
+        release_control_lock
+        return 2
+    fi
+
+    release_control_lock
+    return 0
 }
 
 stop_replay() {
+    acquire_control_lock ||
+        fail "unable to acquire replay control lock" ||
+        return 1
+
     : > "$STOP_REQUEST"
+    stopped_session="$(read_value "$SESSION_FILE")"
+    rm -f "$SESSION_FILE"
+    if waiter_is_running; then
+        log_message \
+            "replay waiter cancelled session=$stopped_session pid=$waiter_pid reason=game-stop"
+    fi
+    stop_waiter
     stop_encoder
     if [ -d "$SAVE_LOCK" ]; then
         set_status SAVING
         log_message "replay stop requested while clip finalizes"
     else
         rm -rf "$R4_REPLAY_BUFFER_DIR" "$SAVE_LOCK"
-        rm -f "$STOP_REQUEST"
-        set_status IDLE
-        log_message "replay stopped"
+        rm -f "$STOP_REQUEST" "$REQUEST_FILE" "$DRM_BASELINE_FILE"
+        if [ "$R4_REPLAY_ENABLED" = "1" ]; then
+            set_status IDLE
+        else
+            set_status DISABLED
+            log_message \
+                "experimental replay disabled reason=R4_REPLAY_ENABLED-is-not-1"
+        fi
+        log_message "replay stopped session=$stopped_session"
     fi
+    release_control_lock
 }
 
 free_megabytes() {
@@ -535,6 +986,20 @@ capture_basename() {
         "$capture_type"
 }
 
+remove_card_owner() {
+    remove_owner="$1"
+    remove_attempt=0
+    while [ "$remove_attempt" -lt 10 ]; do
+        if R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
+           "$GAME_CARD" busy-remove "$remove_owner" >/dev/null 2>&1; then
+            return 0
+        fi
+        remove_attempt=$((remove_attempt + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
 capture_screenshot() {
     capture_sequence="$1"
     command -v "$SCREENSHOT" >/dev/null 2>&1 ||
@@ -547,24 +1012,29 @@ capture_screenshot() {
     owner="capture-screenshot"
 
     if [ "$storage" = "card" ]; then
-        R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
-            "$GAME_CARD" busy-add "$owner" >/dev/null 2>&1 ||
-            return 1
+        if ! R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
+             "$GAME_CARD" busy-add "$owner" >/dev/null 2>&1; then
+            [ "$R4_CAPTURE_FALLBACK_INTERNAL" = "1" ] || return 1
+            directory="$R4_CAPTURE_INTERNAL_SCREENSHOTS"
+            mkdir -p "$directory" || return 1
+            has_free_space "$directory" || return 1
+            storage=internal
+        fi
     fi
 
     base="$(
         capture_basename screenshot
     )-$(sanitize_name "$capture_sequence")"
     final_path="$directory/$base.pbm"
-    temporary_path="$directory/.$base.tmp"
+    # batocera-screenshot chooses its encoder from the filename extension.
+    temporary_path="$directory/.$base.tmp.pbm"
     rm -f "$temporary_path"
 
     if "$SCREENSHOT" "$temporary_path" >/dev/null 2>&1 &&
        [ -s "$temporary_path" ] &&
-       mv "$temporary_path" "$final_path"; then
+        mv "$temporary_path" "$final_path"; then
         if [ "$storage" = "card" ]; then
-            R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
-                "$GAME_CARD" busy-remove "$owner" >/dev/null 2>&1 ||
+            remove_card_owner "$owner" ||
                 true
         fi
         log_message \
@@ -578,7 +1048,26 @@ capture_screenshot() {
         R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
             "$GAME_CARD" operation-error \
             "$owner" screenshot-write-failed >/dev/null 2>&1 ||
+            remove_card_owner "$owner" ||
             true
+
+        if [ "$R4_CAPTURE_FALLBACK_INTERNAL" = "1" ]; then
+            directory="$R4_CAPTURE_INTERNAL_SCREENSHOTS"
+            mkdir -p "$directory" &&
+                has_free_space "$directory" || return 1
+            final_path="$directory/$base.pbm"
+            temporary_path="$directory/.$base.tmp.pbm"
+            rm -f "$temporary_path"
+            if "$SCREENSHOT" "$temporary_path" >/dev/null 2>&1 &&
+               [ -s "$temporary_path" ] &&
+               mv "$temporary_path" "$final_path"; then
+                log_message \
+                    "screenshot result=SAVED seq=$capture_sequence storage=internal fallback=card-write-failed path=$final_path"
+                printf 'SAVED %s\n' "$final_path"
+                return 0
+            fi
+            rm -f "$temporary_path"
+        fi
     fi
     log_message \
         "screenshot result=ERROR seq=$capture_sequence storage=$storage reason=write-failed"
@@ -602,10 +1091,12 @@ write_concat_list() {
 }
 
 restart_after_snapshot() {
+    restart_session="$1"
     [ ! -f "$STOP_REQUEST" ] || return 1
+    session_is_current "$restart_session" || return 1
     sleep 0.5
     mkdir -p "$BUFFER_CURRENT" || return 1
-    launch_encoder
+    launch_encoder "$restart_session"
 }
 
 restore_after_save() {
@@ -615,7 +1106,13 @@ restore_after_save() {
         stop_encoder
         rm -rf "$R4_REPLAY_BUFFER_DIR"
         rm -f "$STOP_REQUEST"
-        set_status IDLE
+        if [ "$R4_REPLAY_ENABLED" = "1" ]; then
+            set_status IDLE
+        else
+            set_status DISABLED
+            log_message \
+                "experimental replay disabled reason=R4_REPLAY_ENABLED-is-not-1"
+        fi
     elif [ "$restore_restarted" -eq 1 ]; then
         set_status BUFFERING
         feedback BUFFERING
@@ -631,11 +1128,12 @@ finish_card_owner() {
 
     [ "$finish_storage" = "card" ] || return 0
     if [ "$finish_success" = "1" ]; then
-        "$GAME_CARD" busy-remove "$finish_owner" >/dev/null 2>&1 ||
+        remove_card_owner "$finish_owner" ||
             true
     else
         "$GAME_CARD" operation-error \
             "$finish_owner" clip-write-failed >/dev/null 2>&1 ||
+            remove_card_owner "$finish_owner" ||
             true
     fi
 }
@@ -675,11 +1173,22 @@ save_worker() {
     started_at="$(date +%s)"
     replay_system="$(read_value "$SYSTEM_FILE")"
     replay_game="$(read_value "$GAME_FILE")"
+    save_session="$(read_value "$SESSION_FILE")"
     snapshot_dir="$R4_REPLAY_BUFFER_DIR/snapshot-$(date +%s)-$$"
     restarted=0
     storage=none
     owner=capture-clip
     temporary_path=""
+
+    acquire_control_lock || {
+        rmdir "$SAVE_LOCK" 2>/dev/null || true
+        return 1
+    }
+    if ! session_is_current "$save_session"; then
+        release_control_lock
+        rmdir "$SAVE_LOCK" 2>/dev/null || true
+        return 1
+    fi
 
     set_status SAVING
     stop_encoder
@@ -687,14 +1196,16 @@ save_worker() {
         mv "$BUFFER_CURRENT" "$snapshot_dir" || {
             feedback ERROR
             set_status ERROR
+            release_control_lock
             rmdir "$SAVE_LOCK" 2>/dev/null || true
             return 1
         }
     fi
     mkdir -p "$BUFFER_CURRENT"
-    if restart_after_snapshot; then
+    if restart_after_snapshot "$save_session"; then
         restarted=1
     fi
+    release_control_lock
 
     concat_list="$snapshot_dir/concat.txt"
     if ! write_concat_list "$snapshot_dir" "$concat_list"; then
@@ -772,6 +1283,13 @@ save_worker() {
 request_save() {
     save_sequence="$1"
 
+    if [ "$R4_REPLAY_ENABLED" != "1" ]; then
+        log_message \
+            "experimental replay save ignored seq=$save_sequence reason=disabled"
+        echo DISABLED
+        return 0
+    fi
+
     if [ "$(current_status)" != "BUFFERING" ] ||
        ! encoder_is_running; then
         echo UNAVAILABLE
@@ -789,28 +1307,54 @@ request_save() {
 
 show_status() {
     status="$(current_status)"
+    waiter_status_pid=NONE
     if encoder_is_running; then
         running=1
         status_pid="$encoder_pid"
+    elif waiter_is_running; then
+        running=0
+        status_pid=NONE
+        waiter_status_pid="$waiter_pid"
+        status=WAITING
     else
         running=0
         status_pid=NONE
+        case "$status" in
+            WAITING|BUFFERING) status=UNAVAILABLE ;;
+        esac
     fi
-    printf 'STATE=%s BACKEND=ffmpeg-kms-pulse RUNNING=%s PID=%s SYSTEM=%s GAME=%s AUDIO=%s\n' \
+    printf 'STATE=%s EXPERIMENTAL=1 ENABLED=%s BACKEND=ffmpeg-kms-pulse-experimental RUNNING=%s PID=%s WAITER_PID=%s SYSTEM=%s GAME=%s AUDIO=%s\n' \
         "$status" \
+        "$R4_REPLAY_ENABLED" \
         "$running" \
         "$status_pid" \
+        "$waiter_status_pid" \
         "$(read_value "$SYSTEM_FILE")" \
         "$(read_value "$GAME_FILE")" \
         "$R4_REPLAY_AUDIO_ENABLED"
 }
 
 cleanup_stale() {
-    if ! encoder_is_running; then
+    acquire_control_lock || return 1
+    if ! encoder_is_running && ! waiter_is_running; then
         rm -rf "$R4_REPLAY_BUFFER_DIR" "$SAVE_LOCK"
-        rm -f "$PID_FILE" "$MONITOR_PID_FILE" "$STOP_REQUEST"
-        set_status IDLE
+        rm -f \
+            "$PID_FILE" \
+            "$MONITOR_PID_FILE" \
+            "$WAITER_PID_FILE" \
+            "$STOP_REQUEST" \
+            "$SESSION_FILE" \
+            "$REQUEST_FILE" \
+            "$DRM_BASELINE_FILE"
+        if [ "$R4_REPLAY_ENABLED" = "1" ]; then
+            set_status IDLE
+        else
+            set_status DISABLED
+            log_message \
+                "experimental replay disabled reason=R4_REPLAY_ENABLED-is-not-1"
+        fi
     fi
+    release_control_lock
 }
 
 command_name="${1:-}"
@@ -848,8 +1392,12 @@ case "$command_name" in
         trim_buffer
         ;;
     monitor)
+        [ "$#" -eq 3 ] || exit 1
+        monitor_encoder "$2" "$3"
+        ;;
+    waiter)
         [ "$#" -eq 2 ] || exit 1
-        monitor_encoder "$2"
+        wait_for_replay_ready "$2"
         ;;
     save-worker)
         [ "$#" -eq 2 ] || exit 1

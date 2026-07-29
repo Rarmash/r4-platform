@@ -24,6 +24,7 @@ start_service() {
     }
 
     mkdir -p "$R4_RUNTIME_DIR" || return 1
+    "$MANAGER" prepare >/dev/null 2>&1 || true
     "$MANAGER" run >/dev/null 2>&1 &
     service_pid=$!
     printf '%s\n' "$service_pid" > "$PID_FILE"

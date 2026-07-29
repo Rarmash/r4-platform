@@ -37,7 +37,7 @@ class MockRelay(threading.Thread):
         if command == "PING":
             return "PONG"
         if command == "VERSION":
-            return "R4_CONTROLLER_FW 0.10.0"
+            return "R4_CONTROLLER_FW 0.12.0"
         if command == "HOST HEARTBEAT":
             return "OK HOST HEARTBEAT"
         if command == "INPUT":

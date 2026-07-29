@@ -10,6 +10,9 @@
 #include "core/r4_framebuffer_transport.h"
 #include "core/r4_protocol.h"
 #include "core/r4_service_buttons.h"
+#include "core/r4_update.h"
+#include "pico/bootrom.h"
+#include "pico/rand.h"
 #include "pico/stdlib.h"
 #include "rgb_led.h"
 #include "rp2040_input.h"
@@ -24,6 +27,7 @@
 #define CDC_COMMAND_BUFFER_SIZE \
     (R4_PROTOCOL_MAX_LINE_LENGTH + 1U)
 #define CDC_WRITE_TIMEOUT_MS 1000
+#define UPDATE_REBOOT_DELAY_MS 150
 
 static char cdc_command_buffer[CDC_COMMAND_BUFFER_SIZE];
 static size_t cdc_command_length;
@@ -40,6 +44,9 @@ static uint8_t framebuffer_pixels[
 static uint8_t framebuffer_packed[R4_FRAMEBUFFER_PACKED_SIZE];
 static uint32_t framebuffer_snapshot_id;
 static bool framebuffer_snapshot_valid;
+static r4_update_manager_t update_manager;
+static bool update_reboot_pending;
+static absolute_time_t update_reboot_deadline;
 
 #if R4_ENABLE_TEST_INPUT
 static bool test_triggers_active;
@@ -252,6 +259,37 @@ static void cdc_write_line(const char *text) {
 
     static const char line_ending[] = "\r\n";
     cdc_write_all(line_ending, sizeof(line_ending) - 1U);
+}
+
+static uint64_t update_now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+static uint32_t generate_update_token(void) {
+    uint32_t token = get_rand_32();
+    if (token == 0U) {
+        token = 1U;
+    }
+    return token;
+}
+
+static void schedule_usb_bootloader_reset(void) {
+    update_reboot_pending = true;
+    update_reboot_deadline =
+        make_timeout_time_ms(UPDATE_REBOOT_DELAY_MS);
+}
+
+static void update_reboot_task(void) {
+    if (
+        !update_reboot_pending ||
+        !time_reached(update_reboot_deadline)
+    ) {
+        return;
+    }
+
+    tud_cdc_write_flush();
+    sleep_ms(20);
+    reset_usb_boot(0U, 0U);
 }
 
 static void copy_decoded_field(
@@ -484,7 +522,9 @@ static void process_host_capture(const char *payload) {
 
 static void process_host_card(const char *payload) {
     char state[16];
+    char present[4];
     char notification[24];
+    bool show_notification = true;
 
     if (
         !r4_protocol_find_field(
@@ -515,17 +555,49 @@ static void process_host_card(const char *payload) {
         "%s",
         state
     );
-    snprintf(
-        notification,
-        sizeof(notification),
-        "CARD %s",
-        state
-    );
-    r4_display_show_notification(
-        &display_model,
-        notification,
-        to_ms_since_boot(get_absolute_time())
-    );
+
+    if (strcmp(state, "EJECTED") == 0) {
+        if (
+            r4_protocol_find_field(
+                payload,
+                "PRESENT",
+                present,
+                sizeof(present)
+            )
+        ) {
+            display_model.card_present =
+                strcmp(present, "1") == 0;
+        } else {
+            display_model.card_present = true;
+        }
+
+        if (display_model.card_present) {
+            snprintf(
+                notification,
+                sizeof(notification),
+                "SAFE TO REMOVE"
+            );
+        } else {
+            display_model.notification_visible = false;
+            show_notification = false;
+        }
+    } else {
+        display_model.card_present = true;
+        snprintf(
+            notification,
+            sizeof(notification),
+            "CARD %s",
+            state
+        );
+    }
+
+    if (show_notification) {
+        r4_display_show_notification(
+            &display_model,
+            notification,
+            to_ms_since_boot(get_absolute_time())
+        );
+    }
     cdc_write_line("OK HOST CARD");
 }
 
@@ -1108,6 +1180,92 @@ static void process_parsed_command(
             );
             break;
 
+        case R4_COMMAND_UPDATE_ARM: {
+            const uint32_t token = generate_update_token();
+            r4_update_arm(
+                &update_manager,
+                token,
+                update_now_ms()
+            );
+            r4_display_show_notification(
+                &display_model,
+                "UPDATE ARMED",
+                (uint32_t)update_now_ms()
+            );
+            start_led_flash(24, 12, 0, R4_UPDATE_TOKEN_TTL_MS);
+            snprintf(
+                response,
+                sizeof(response),
+                "UPDATE ARMED TOKEN=%08lX TTL_MS=%u",
+                (unsigned long)token,
+                R4_UPDATE_TOKEN_TTL_MS
+            );
+            cdc_write_line(response);
+            break;
+        }
+
+        case R4_COMMAND_UPDATE_STATUS: {
+            uint32_t remaining_ms = 0;
+            if (
+                r4_update_status(
+                    &update_manager,
+                    update_now_ms(),
+                    &remaining_ms
+                ) == R4_UPDATE_ARMED
+            ) {
+                snprintf(
+                    response,
+                    sizeof(response),
+                    "UPDATE STATUS ARMED TTL_MS=%lu",
+                    (unsigned long)remaining_ms
+                );
+                cdc_write_line(response);
+            } else {
+                cdc_write_line("UPDATE STATUS IDLE");
+            }
+            break;
+        }
+
+        case R4_COMMAND_UPDATE_CONFIRM: {
+            uint32_t token = 0;
+            if (!r4_update_parse_token(command->payload, &token)) {
+                cdc_write_line("ERR UPDATE_TOKEN_FORMAT");
+                break;
+            }
+            const r4_update_confirm_result_t result =
+                r4_update_confirm(
+                    &update_manager,
+                    token,
+                    update_now_ms()
+                );
+            switch (result) {
+                case R4_UPDATE_CONFIRM_OK:
+                    r4_display_show_notification(
+                        &display_model,
+                        "USB UPDATE",
+                        (uint32_t)update_now_ms()
+                    );
+                    start_led_flash(24, 0, 24, 1000);
+                    cdc_write_line("OK UPDATE BOOTLOADER");
+                    schedule_usb_bootloader_reset();
+                    break;
+                case R4_UPDATE_CONFIRM_EXPIRED:
+                    cdc_write_line("ERR UPDATE_TOKEN_EXPIRED");
+                    break;
+                case R4_UPDATE_CONFIRM_INVALID_TOKEN:
+                    cdc_write_line("ERR UPDATE_TOKEN_MISMATCH");
+                    break;
+                case R4_UPDATE_CONFIRM_ALREADY_USED:
+                    cdc_write_line("ERR UPDATE_TOKEN_USED");
+                    break;
+                case R4_UPDATE_CONFIRM_NOT_ARMED:
+                default:
+                    cdc_write_line("ERR UPDATE_NOT_ARMED");
+                    break;
+            }
+            break;
+        }
+
         case R4_COMMAND_HOST_HEARTBEAT:
             r4_display_arm_host_watchdog(
                 &display_model,
@@ -1186,7 +1344,9 @@ static void process_parsed_command(
                 "LED <R> <G> <B> "
                 "LED FLASH <R> <G> <B> <MS> "
                 "LED OFF EVENT NEXT FRAMEBUFFER INFO "
-                "FRAMEBUFFER CHUNK ... HOST HEARTBEAT "
+                "FRAMEBUFFER CHUNK ... UPDATE ARM "
+                "UPDATE CONFIRM <TOKEN> UPDATE STATUS "
+                "HOST HEARTBEAT "
                 "HOST CAPTURE TYPE=... STATUS=... "
                 "HOST CARD STATE=... HELP"
             );
@@ -1226,6 +1386,10 @@ static void process_cdc_command(void) {
         strncmp(cdc_command_buffer, "LED", 3) == 0
     ) {
         cdc_write_line("ERR LED_USAGE");
+    } else if (
+        strncmp(cdc_command_buffer, "UPDATE", 6) == 0
+    ) {
+        cdc_write_line("ERR UPDATE_USAGE");
     } else if (status == R4_PARSE_TOO_LONG) {
         cdc_write_line("ERR LINE_TOO_LONG");
     } else {
@@ -1288,6 +1452,7 @@ static void cdc_service_task(void) {
 
 int main(void) {
     r4_controller_state_reset(&controller_state);
+    r4_update_init(&update_manager);
     r4_display_model_init(&display_model);
     snprintf(
         display_model.firmware_version,
@@ -1336,6 +1501,7 @@ int main(void) {
     while (true) {
         tud_task();
         cdc_service_task();
+        update_reboot_task();
         led_task();
 
         const uint32_t current_time_ms =

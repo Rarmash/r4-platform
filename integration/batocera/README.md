@@ -26,16 +26,79 @@ The current implementation supports:
 - analog LT and RT axes in the `0.8.0` HID descriptor;
 - polling of queued R4, Capture and Trophy service events;
 - end-to-end Capture SHORT screenshots through `batocera-screenshot`;
-- a bounded segmented previous-game replay buffer for Capture LONG;
+- an opt-in experimental previous-game replay implementation for Capture LONG,
+  disabled by default on Orange Pi 3 LTS;
 - one-filesystem R4 Game Card management with read-only ROM and writable
   capture views;
 - game, RetroAchievements and display-state forwarding to RP2040;
 - complete EmulationStation controller mapping;
 - standard `R4 + Start` emulator exit handling.
 
+## 0.12.0 release notes
+
+`0.12.0` adds a guarded **host-assisted USB firmware update** for compatible
+RP2040 firmware. It is not OTA: Orange Pi asks the running firmware to enter
+the RP2040 ROM USB bootloader, mounts the uniquely identified `RPI-RP2`
+filesystem, copies a validated UF2, syncs and unmounts it, then verifies the
+returned CDC/HID device and exact firmware version.
+
+The updater requires an R4 release manifest, RP2040 UF2 family ID and matching
+SHA-256. SHA-256 is an integrity check, not authentication. It refuses to run
+during a game, with zero or multiple R4 Controllers, or with zero/multiple
+matching bootloaders. A candidate must match USB VID `2e8a`, PID `0003` and
+filesystem label `RPI-RP2`; it never selects the first `/dev/sdX` and never
+uses `dd`.
+
+Firmware `0.11.1` cannot enter the ROM bootloader by CDC. The first installation
+of firmware `0.12.0` therefore requires physical BOOTSEL one final time. Once
+`0.12.0` is running, the same release can be reflashed to verify the complete
+host-assisted path.
+
+The same release disables Instant Replay after both a fresh installation and
+the first
+upgrade from an older integration. Capture SHORT remains a supported
+`batocera-screenshot` action. Capture LONG is intentionally ignored unless a
+developer explicitly sets `R4_REPLAY_ENABLED=1`; status and logs identify this
+path as experimental and warn about its high CPU load. Reinstalling `0.12.0`
+preserves a deliberate opt-in, while the one-time upgrade migration prevents a
+previous default-on configuration from silently continuing to record.
+
+Orange Pi 3 LTS has no hardware H.264 encoder. The available `cedrus` and
+`allwinner,sun50i-h6-vpu-g2-dec` devices are decoders, and
+`h264_v4l2m2m` found no encode device. Software capture is unsuitable as a user
+feature: 720p produced about 5 FPS, while even 640x360 at a requested 10 FPS
+produced only about 7-8 unique FPS and noticeably loaded all four Cortex-A53
+cores. Instant Replay is therefore unsupported on the current hardware
+revision and deferred until a board with hardware video encoding is used.
+Screenshots remain fully supported.
+
+The preserved experimental FFmpeg path includes `-vsync 0` to avoid duplicate
+frames causing accelerated video or A/V drift. It scales only when the source
+is wider than the configured maximum and preserves aspect ratio; it neither
+forces a 1280x720 mode nor changes Batocera videomode settings.
+
+## 0.11.1 release notes
+
+`0.11.1` fixes the Batocera 40 startup regression introduced by synchronous
+`kmsgrab` startup in `0.11.0`. `R4GameState` still performs Game Card, LED and
+`HOST GAME` work during `gameStart`, but `r4-replay start` now returns after
+creating a background replay session. A bounded waiter records the current
+DRM-card holders, waits for a new stable PID/start-time identity on the same
+card, verifies an enabled/connected connector plus a non-zero active fbdev
+framebuffer, and only then launches FFmpeg. This avoids competing with
+RetroArch or a standalone emulator while it acquires DRM/KMS.
+
+`gameStop` invalidates the session before stopping both waiter and encoder.
+Repeated starts are idempotent, stale waiters cannot launch into a later game,
+and readiness timeout or encoder failure leaves replay unavailable without
+failing the game hook. Existing `0.11.0` replay configuration remains valid:
+the new readiness settings have backward-compatible defaults.
+
 ## Components
 
 - `bin/r4-ecctl` — discovers the RP2040 CDC interface and sends service commands.
+- `bin/r4-firmware-update` — validates and performs the guarded host-assisted
+  USB firmware update.
 - `bin/r4-led-state` — stores and applies the current persistent LED mode.
 - `bin/r4-game-title` — resolves a ROM path to its `<name>` in
   EmulationStation `gamelist.xml`.
@@ -43,11 +106,14 @@ The current implementation supports:
 - `bin/r4-game-card` — validates, mounts and safely ejects the configured ROM
   card without opening USB CDC directly.
 - `bin/r4-replay` — owns the bounded FFmpeg replay ring and capture routing.
+- `integration-version.conf` — defines the Batocera integration release
+  version (`0.12.0`).
 - `firmware-version.conf` — defines the expected RP2040 firmware version.
 - `oled-tcp.conf` — opt-in TCP bind address and port.
 - `game-card.conf` — preserved Game Card identity, mountpoint and polling
   configuration.
 - `replay.conf` — preserved replay, encoding and capture-storage settings.
+- `CHANGELOG.md` — Batocera integration release history.
 - `services/R4Controller` — monitors the embedded controller and handles reconnection.
 - `services/R4GameCard` — polls the removable-card state machine.
 - `scripts/R4GameState` — changes the LED state when a game starts or stops.
@@ -56,18 +122,23 @@ The current implementation supports:
   title instead of the ROM filename.
 - `emulationstation/achievements/R4Achievement` — triggers a temporary achievement flash.
 - `install.sh` — installs or updates the complete Batocera integration.
+- `uninstall.sh` — stops replay and services, removes installed executables and
+  every `R4GameState*` hook, and preserves configuration, logs and captures.
 - `tests/run-tests.sh` — shell syntax and mock service-event checks.
 
 ## Repository layout
 
 ```text
 integration/batocera/
+├── integration-version.conf
 ├── firmware-version.conf
 ├── game-card.conf
 ├── oled-tcp.conf
 ├── replay.conf
+├── CHANGELOG.md
 ├── bin/
 │   ├── r4-ecctl
+│   ├── r4-firmware-update
 │   ├── r4-game-title
 │   ├── r4-game-card
 │   ├── r4-led-state
@@ -86,6 +157,7 @@ integration/batocera/
 │   └── game-selected/
 │       └── R4GameMetadata
 ├── install.sh
+├── uninstall.sh
 ├── tests/
 │   └── run-tests.sh
 └── README.md
@@ -96,11 +168,13 @@ integration/batocera/
 | Repository file | Batocera path |
 |---|---|
 | `bin/r4-ecctl` | `/userdata/system/r4/r4-ecctl` |
+| `bin/r4-firmware-update` | `/userdata/system/r4/r4-firmware-update` |
 | `bin/r4-led-state` | `/userdata/system/r4/r4-led-state` |
 | `bin/r4-game-title` | `/userdata/system/r4/r4-game-title` |
 | `bin/r4-game-card` | `/userdata/system/r4/r4-game-card` |
 | `bin/r4-oled-tcp` | `/userdata/system/r4/r4-oled-tcp` |
 | `bin/r4-replay` | `/userdata/system/r4/r4-replay` |
+| `integration-version.conf` | `/userdata/system/r4/integration-version.conf` |
 | `firmware-version.conf` | `/userdata/system/r4/firmware-version.conf` |
 | `game-card.conf` | `/userdata/system/r4/game-card.conf` |
 | `oled-tcp.conf` | `/userdata/system/r4/oled-tcp.conf` |
@@ -119,9 +193,9 @@ temporary archive first; do not pipe native `tar` bytes through the PowerShell
 object pipeline:
 
 ```powershell
-tar -C ./integration/batocera -czf ./r4-batocera-0.10.0.tar.gz .
-scp ./r4-batocera-0.10.0.tar.gz root@192.168.1.154:/tmp/
-ssh root@192.168.1.154 "rm -rf /userdata/system/r4-installer && mkdir -p /userdata/system/r4-installer && tar -C /userdata/system/r4-installer -xzf /tmp/r4-batocera-0.10.0.tar.gz"
+tar -C ./integration/batocera -czf ./r4-batocera-0.12.0.tar.gz .
+scp ./r4-batocera-0.12.0.tar.gz root@192.168.1.154:/tmp/
+ssh root@192.168.1.154 "rm -rf /userdata/system/r4-installer && mkdir -p /userdata/system/r4-installer && tar -C /userdata/system/r4-installer -xzf /tmp/r4-batocera-0.12.0.tar.gz"
 ```
 
 Run the installer:
@@ -140,10 +214,102 @@ It:
 - creates the required directories;
 - replaces the installed files;
 - restores executable permissions;
-- preserves existing `oled-tcp.conf`, `game-card.conf` and `replay.conf`;
+- preserves existing `oled-tcp.conf`, `game-card.conf` and `replay.conf`, except
+  that the first `0.12.0` upgrade forces the old replay opt-in to `0`;
+- stops an installed replay waiter and encoder before replacing `r4-replay`;
+- removes `R4GameState.disabled` from the active scripts directory, removes the
+  executable bit from other `R4GameState.*` backups, and never restores the
+  parked `/userdata/system/r4/R4GameState.disabled` as a hook;
 - enables and starts the controller and Game Card services;
 - checks the connected firmware version;
 - prints the resulting controller and Game Card status.
+
+Updating an existing `0.12.0` integration does not replace
+`/userdata/system/r4/game-card.conf`. To verify the real card UUID before and
+after the update:
+
+```sh
+cp /userdata/system/r4/game-card.conf \
+    /userdata/system/r4/game-card.conf.before-0.12.0
+/userdata/system/r4-installer/install.sh
+grep '^R4_GAME_CARD_UUID=2902-F590$' \
+    /userdata/system/r4/game-card.conf
+
+for hook in /userdata/system/scripts/R4GameState*; do
+    [ -x "$hook" ] && printf '%s\n' "$hook"
+done
+```
+
+The final command must print only
+`/userdata/system/scripts/R4GameState`. After the first `0.12.0` update,
+`R4_REPLAY_ENABLED=0` must be present in the preserved `replay.conf`.
+
+## Host-assisted USB firmware update
+
+Build the firmware release target and copy all three release files to Orange
+Pi, for example under `/userdata/system/r4/firmware`:
+
+```powershell
+scp ./firmware/r4-controller-fw/build/release/r4-controller-fw-0.12.0.uf2 `
+  root@192.168.1.154:/userdata/system/r4/firmware/
+scp ./firmware/r4-controller-fw/build/release/r4-controller-fw-0.12.0.uf2.manifest `
+  root@192.168.1.154:/userdata/system/r4/firmware/
+scp ./firmware/r4-controller-fw/build/release/r4-controller-fw-0.12.0.uf2.sha256 `
+  root@192.168.1.154:/userdata/system/r4/firmware/
+```
+
+Interactive update:
+
+```sh
+/userdata/system/r4/r4-ecctl firmware update \
+    /userdata/system/r4/firmware/r4-controller-fw-0.12.0.uf2
+```
+
+Documented non-interactive form:
+
+```sh
+/userdata/system/r4/r4-ecctl firmware update --yes \
+    /userdata/system/r4/firmware/r4-controller-fw-0.12.0.uf2
+```
+
+Before arming the controller, the updater validates every UF2 block, RP2040
+family ID `0xE48BFF56`, the R4 product/version manifest and SHA-256; verifies
+that no game process or game marker is active; requires exactly one R4
+Controller; and displays current and target versions. The interactive form
+requires typing `UPDATE`.
+
+After `UPDATE ARM` / `UPDATE CONFIRM`, it accepts only a unique device matching
+all of USB VID `2e8a`, PID `0003` and filesystem label `RPI-RP2`. It mounts that
+partition in a private temporary directory, copies the UF2 normally, calls
+`sync`, unmounts it, waits for the bootloader to disappear and for the composite
+CDC/HID device to return, then checks `VERSION`. Each stage has a timeout and
+cleanup restarts `R4Controller`.
+
+Do not use `dd`. Do not choose a disk by `/dev/sdX` ordering. The updater does
+not provide rollback or guarantee preservation of the previous firmware.
+After a failed copy or a version/return timeout, recover by holding physical
+BOOTSEL while connecting RP2040 and manually copy the already verified UF2 to
+`RPI-RP2`. The ROM bootloader is independent of application firmware and
+remains available if the application image is damaged.
+
+Bootstrap limitation: the currently installed `0.11.1` firmware has no
+`UPDATE` commands. Install `0.12.0` through physical BOOTSEL once. After it
+reports `R4_CONTROLLER_FW 0.12.0`, repeat the command above to test a complete
+host-assisted update without pressing BOOTSEL.
+
+## Uninstallation
+
+Run the uninstaller from the extracted integration package:
+
+```sh
+chmod +x /userdata/system/r4-installer/uninstall.sh
+/userdata/system/r4-installer/uninstall.sh
+```
+
+It stops and disables both services, stops a waiting or running replay session,
+removes the installed programs and all `R4GameState*` hooks, and clears replay
+runtime state. It deliberately preserves `replay.conf`, the other user
+configuration, logs, screenshots and recordings under `/userdata`.
 
 ## Manual executable permissions
 
@@ -151,6 +317,7 @@ All installed scripts must be executable:
 
 ```sh
 chmod +x /userdata/system/r4/r4-ecctl
+chmod +x /userdata/system/r4/r4-firmware-update
 chmod +x /userdata/system/r4/r4-led-state
 chmod +x /userdata/system/r4/r4-game-title
 chmod +x /userdata/system/r4/r4-game-card
@@ -257,12 +424,30 @@ Unchanged hashes return `FRAMEBUFFER UNCHANGED`. TCP framing remains one
 ## Capture and previous-game replay
 
 `R4Controller` consumes every queued Capture event exactly once. SHORT invokes
-Batocera's real `batocera-screenshot` command exactly once. LONG does not make a
-screenshot and does not start a future recording: it asks `r4-replay` to freeze
-and finalize the preceding buffered gameplay.
+Batocera's real `batocera-screenshot` command exactly once. This remains a
+supported user feature regardless of the replay setting.
 
-While a supported game runs, `r4-replay` launches the FFmpeg available in
-Batocera 40:
+Replay is completely off by default. `r4-replay start` records the disabled
+status and returns without creating its ring directory, starting its readiness
+waiter, or launching FFmpeg. Capture LONG is logged as ignored and sends no clip
+feedback to the firmware. Nothing changes the system videomode.
+
+The old implementation remains available only for development experiments.
+To opt in, edit `/userdata/system/r4/replay.conf`:
+
+```sh
+sed -i 's/^R4_REPLAY_ENABLED=.*/R4_REPLAY_ENABLED=1/' \
+    /userdata/system/r4/replay.conf
+```
+
+This setting is deliberately not exposed as a normal user option. It carries a
+high-load warning and is unsupported on Orange Pi 3 LTS. Start a new game after
+changing it. While enabled, LONG does not start a future recording: it asks
+`r4-replay` to freeze and finalize the preceding buffered gameplay.
+
+For an enabled experimental session, `r4-replay start` creates a unique
+background session and returns to `R4GameState`. The waiter detects a new,
+stable DRM-card holder and an active framebuffer before launching FFmpeg:
 
 ```text
 DRM/KMS framebuffer --kmsgrab--> libx264 video --+
@@ -271,27 +456,15 @@ Pulse default monitor ---------> AAC audio ------+--> rotating MPEG-TS segments
 Capture LONG --> snapshot complete segments --> concat stream copy --> MP4
 ```
 
-The ring defaults to two-second segments in `/tmp/r4-replay`. On the checked
-Orange Pi 3 LTS, `/tmp` is a roughly 963 MiB tmpfs. Both duration and total
-buffer size are bounded; old segments are overwritten/trimmed, stale data is
-removed at startup, and only the finished MP4 is written to persistent storage.
-Finalization uses stream copy rather than a second full encode, validates video
-and audio streams with `ffprobe` when available, then atomically renames the
-file. A short game may produce a clip shorter than 30 seconds.
-
-The actual Batocera 40 audit found FFmpeg 4.4.4 with `kmsgrab`, Pulse input,
-segment muxing, `libx264`, AAC and MP4 support. KMS capture, Pulse-monitor
-audio, segmented encoding and a playable H.264/AAC MP4 finalization were
-smoke-tested on the Orange Pi. Its exposed V4L2 devices did not provide a
-working H.264 encoder to FFmpeg, so the current backend deliberately uses CPU
-`libx264`. RetroArch includes recording support but Batocera's launch path does
-not expose a persistent previous-game ring. No fictitious production backend
-is used.
+The ring uses bounded rotating segments in `/tmp/r4-replay`; that directory is
+created only after explicit opt-in. The experimental encoder uses CPU
+`libx264`, preserves the source aspect ratio, and includes `-vsync 0`.
+Finalization uses stream copy and validates the output where `ffprobe` exists.
 
 `/userdata/system/r4/replay.conf` controls the limits and routing:
 
 ```sh
-R4_REPLAY_ENABLED=1
+R4_REPLAY_ENABLED=0
 R4_REPLAY_SECONDS=30
 R4_REPLAY_SEGMENT_SECONDS=2
 R4_REPLAY_BUFFER_DIR=/tmp/r4-replay
@@ -302,6 +475,10 @@ R4_REPLAY_VIDEO_BITRATE=4000000
 R4_REPLAY_VIDEO_PRESET=ultrafast
 R4_REPLAY_AUDIO_ENABLED=1
 R4_REPLAY_DISABLED_SYSTEMS=dreamcast
+R4_REPLAY_DRM_DEVICE=/dev/dri/card0
+R4_REPLAY_READY_TIMEOUT_SECONDS=20
+R4_REPLAY_READY_POLL_MS=250
+R4_REPLAY_READY_STABLE_POLLS=4
 R4_CAPTURE_STORAGE=auto
 R4_CAPTURE_MIN_FREE_MB=256
 R4_CAPTURE_FALLBACK_INTERNAL=1
@@ -311,22 +488,25 @@ R4_CAPTURE_INTERNAL_VIDEOS=/userdata/recordings
 
 `R4_CAPTURE_MIN_FREE_MB` is only a refusal threshold, not a quota or reserved
 space. `auto` prefers a writable Game Card capture view and otherwise uses the
-internal paths when fallback is enabled. Dreamcast is disabled until real
-performance testing. A missing backend, disabled system or inactive ring
-returns `CLIP UNAVAILABLE`; concurrent saves return `BUSY` without starting a
-second finalizer.
+internal paths when fallback is enabled. With replay disabled, status is
+explicit:
 
-Firmware feedback distinguishes screenshots and clips:
+```text
+STATE=DISABLED EXPERIMENTAL=1 ENABLED=0 BACKEND=ffmpeg-kms-pulse-experimental RUNNING=0 ...
+```
+
+With the dev flag enabled, status reports `WAITING` and then `BUFFERING`, always
+with `EXPERIMENTAL=1 ENABLED=1`. Logs include
+`warning=high-cpu-load-unsupported-hardware`. Firmware feedback distinguishes
+supported screenshots from experimental clips:
 
 ```text
 HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY|SAVED|ERROR
 HOST CAPTURE TYPE=CLIP STATUS=BUFFERING|SAVING|SAVED|ERROR|UNAVAILABLE
 ```
 
-The OLED shows `RPL` while the ring is healthy, followed by bounded
-`CLIP SAVING`, `CLIP SAVED`, `CLIP ERROR` or `CLIP UNAVAILABLE` notifications.
-RGB uses amber while saving, green on success and red on failure, then restores
-the persistent game/menu color.
+The OLED replay indicator and clip notifications are reachable only after the
+dev opt-in. In the normal configuration, LONG produces no replay notification.
 
 Until Capture is electrically connected through the future GPIO expander, use
 the service test entry point:
@@ -339,8 +519,8 @@ tail -n 50 /userdata/system/r4/r4-replay.log
 ls -lt /userdata/screenshots /userdata/recordings
 ```
 
-This verifies the host path but does not claim that the physical Capture input
-or gameplay performance is hardware-verified.
+During a normal launch, the log records that experimental replay is disabled.
+It must not contain a new `ffmpeg launched` line.
 
 ## R4 Game Card
 
@@ -361,8 +541,19 @@ whole card RW private mount --> /userdata/system/r4/game-card
 
 Batocera 40 was checked with a temporary filesystem: its util-linux `mount`
 supports bind mounts and `remount,bind,ro`; a write through the ROM view was
-rejected while a writable sibling view remained writable. The physical reader
-and final SD card still require verification.
+rejected while a writable sibling view remained writable. A physical exFAT
+card with UUID `2902-F590` was subsequently verified with the same
+private/RO/RW mounts, BUSY protection and safe eject.
+
+Batocera's exFAT userspace mount requires `/dev/fuse`. At service startup,
+`R4GameCard` asks the manager to prepare the current card. For exFAT only, the
+manager checks that `/dev/fuse` is a readable and writable character device,
+runs `modprobe fuse` when necessary, and verifies the device again. Every scan
+keeps the same defensive check. A failed command becomes
+`ERROR / fuse-modprobe-failed`; a successful command without a usable device
+becomes `ERROR / fuse-device-unavailable`. The failed physical identity is
+remembered, so polling does not repeatedly run `modprobe`; a newly available
+`/dev/fuse` or a new card session can recover.
 
 The preserved configuration is `/userdata/system/r4/game-card.conf`:
 
@@ -390,14 +581,46 @@ The public states remain `INSERTED`, `READY`, `BUSY`, `EJECTED` and `ERROR`.
 BUSY is represented by independent owners, currently `rom`,
 `capture-screenshot` and `capture-clip`; overlapping owners cannot clear each
 other. Safe eject refuses every active owner, calls `sync`, unmounts the three
-published views before the private mount, then latches `EJECTED` until physical
-removal/reinsertion. Unsafe physical removal becomes `ERROR`.
+published views before the private mount, then latches `EJECTED`.
+
+Stable scans are edge-triggered. If the same physical session is already
+`READY` or `BUSY` and all views are intact, a scan does not call mount, rewrite
+the state file, or publish another OLED/RGB notification. The manager records
+the kernel `DISKSEQ` from the partition's sysfs `uevent`. After safe eject, the
+same `DISKSEQ` stays latched even though the partition remains visible.
+Observed absence clears the old session. A different `DISKSEQ` is accepted as
+a new session even if polling missed the brief absence and the device changed
+from `/dev/sda1` to `/dev/sdb1`. UUID/label still select the card; `/dev/sdX`
+is never configured.
+
+On kernels without `DISKSEQ`, the manager falls back to sysfs major:minor and
+finally the device path. With those fallbacks, a very fast reconnect that
+reuses the same identity while polling misses absence cannot be guaranteed;
+the safe behavior is to retain the eject latch until absence is observed.
+Unsafe physical removal without safe eject becomes `ERROR`.
 
 ```sh
 /userdata/system/r4/r4-game-card status
+/userdata/system/r4/r4-game-card prepare
 /userdata/system/r4/r4-game-card busy-list
 /userdata/system/r4/r4-game-card scan
 /userdata/system/r4/r4-game-card eject
+```
+
+Useful Batocera diagnostics:
+
+```sh
+ls -l /dev/fuse
+grep -w fuse /proc/modules
+/userdata/system/r4/r4-game-card status
+device="$(
+    /userdata/system/r4/r4-game-card status |
+        sed -n 's/.* DEVICE=\([^ ]*\).*/\1/p'
+)"
+[ "$device" = NONE ] ||
+    grep -E '^(DEVNAME|MAJOR|MINOR|DISKSEQ)=' \
+        "/sys/class/block/${device##*/}/uevent"
+tail -n 50 /userdata/system/r4/r4-game-card.log
 ```
 
 The legacy `R4_GAME_CARD_MOUNTPOINT=/userdata/roms/r4-card` remains accepted as
@@ -570,10 +793,12 @@ Poll the next queued service-button event:
 
 It returns `EVENT NONE` or a single
 `EVENT BUTTON=CAPTURE ACTION=SHORT TIME_MS=1450 SEQ=3` line. The service
-recognizes Capture, R4 and Trophy events. Capture SHORT and LONG are implemented
-as screenshot and previous-game replay respectively. The achievement browser,
-future R4 system panel, and standalone long/double R4 host actions remain
-explicit stubs; the service logs them without claiming those features.
+recognizes Capture, R4 and Trophy events. Capture SHORT is a supported
+screenshot action. Capture LONG is ignored by default and reaches the retained
+previous-game replay implementation only with the explicit experimental flag.
+The achievement browser, future R4 system panel, and standalone long/double R4
+host actions remain explicit stubs; the service logs them without claiming
+those features.
 
 Set a persistent LED color:
 
@@ -785,6 +1010,51 @@ Run repository-side shell and mock checks on a POSIX host:
 sh integration/batocera/tests/run-tests.sh
 ```
 
+## 0.12.0 replay verification on Batocera 40
+
+After a normal install, verify the supported default:
+
+```sh
+cat /userdata/system/r4/integration-version.conf
+grep '^R4_REPLAY_ENABLED=0$' /userdata/system/r4/replay.conf
+/userdata/system/r4/r4-replay status
+ps | grep -E '[r]4-replay (waiter|monitor)|[f]fmpeg'
+test ! -d /tmp/r4-replay
+```
+
+The version is `0.12.0`, status contains `STATE=DISABLED EXPERIMENTAL=1
+ENABLED=0`, and both process and ring-directory checks are empty. Launch a game
+and repeat the checks; they must remain empty.
+
+Verify both Capture actions:
+
+```sh
+R4_ENABLE_TEST_EVENTS=1 \
+    /userdata/system/services/R4Controller test-event CAPTURE SHORT
+
+R4_ENABLE_TEST_EVENTS=1 \
+    /userdata/system/services/R4Controller test-event CAPTURE LONG
+
+tail -n 30 /userdata/system/r4/r4-controller.log
+ls -lt /userdata/screenshots
+```
+
+SHORT creates exactly one screenshot. LONG logs
+`result=IGNORED detail=experimental-replay-disabled` and creates no process,
+ring, or recording.
+
+Only to audit the retained developer path, set `R4_REPLAY_ENABLED=1`, launch a
+game, and inspect:
+
+```sh
+/userdata/system/r4/r4-replay status
+tail -n 80 /userdata/system/r4/r4-replay.log
+```
+
+Status must include `EXPERIMENTAL=1 ENABLED=1`; the log must contain the
+high-load warning. Restore `R4_REPLAY_ENABLED=0` immediately after the audit
+and exit the game.
+
 ## Batocera 40 verification checklist
 
 This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
@@ -796,16 +1066,18 @@ This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
 | Batocera 40 FFmpeg/KMS/Pulse/segment capabilities | Checked on the Orange Pi |
 | H.264/AAC segmented smoke clip and `ffprobe` validation | Checked on the Orange Pi outside gameplay |
 | RO bind view beside RW views | Checked on Batocera with a temporary filesystem |
-| Firmware `0.10.0` UF2 | Built, not flashed |
-| 30-second replay FPS/CPU/quality in PS1 | Not yet hardware-verified |
-| Dreamcast replay | Disabled and not hardware-verified |
-| Physical Game Card reader/card and safe eject | Not yet hardware-verified |
+| Firmware `0.12.0` UF2 | Built; first BOOTSEL installation required from `0.11.1` |
+| Instant Replay on Orange Pi 3 LTS | Unsupported; default disabled in integration `0.12.0` |
+| Software capture performance | 720p about 5 FPS; 640x360@10 about 7-8 unique FPS with high four-core load |
+| Physical exFAT Game Card, views, BUSY and safe eject | Hardware-verified on Batocera 40 |
+| Automatic FUSE recovery after a cold boot | Implemented; reboot verification pending |
+| DISKSEQ rapid-reconnect recovery | Implemented and mocked; physical rapid-reconnect verification pending |
 | Physical Capture input through MCP23017 | Not yet hardware-verified |
 | Physical OLED | Not yet hardware-verified |
 
 1. Install the integration and confirm `R4Controller status` becomes `online`.
 2. Check `PING`, `VERSION`, `INPUT`, `STATUS` and the configured
-   `0.10.0` version.
+   `0.12.0` version.
 3. Unplug/replug and reset the RP2040; confirm rediscovery, one service instance,
    restored LED state and no repetitive log flood.
 4. Remap the changed descriptor; verify all old controls and
@@ -817,22 +1089,25 @@ This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
    the OLED-state message.
 8. Inject `CAPTURE SHORT`; confirm exactly one new screenshot, typed `SAVED`
    feedback and base-color restoration.
-9. Run a supported game for more than 30 seconds, inject `CAPTURE LONG`, and
-   confirm exactly one preceding-game MP4 with H.264 video and AAC audio.
-   Measure gameplay FPS, CPU load, FFmpeg warnings/dropped frames and playback
-   quality. Repeat on PS1. Dreamcast must remain `UNAVAILABLE` until a separate
-   performance run justifies enabling it.
+9. With the normal `R4_REPLAY_ENABLED=0`, launch a game and inject
+   `CAPTURE LONG`; confirm the ignored log entry, no FFmpeg process, no ring
+   directory and no new recording. Optionally enable the explicit dev flag only
+   to confirm that the preserved path reports itself as experimental.
 10. With a correctly labeled/UUID Game Card, run `init` twice and verify one
    primary mount, a read-only ROM view, writable screenshot/video views and
    shared free space. Verify each BUSY owner blocks eject, overlapping owners
-   coexist, `sync` precedes view/private unmounts, safe eject latches `EJECTED`,
-   and reinsertion returns to `READY`.
+   coexist, and repeated READY scans produce no new state messages. Reboot
+   without manually running `modprobe`; `/dev/fuse` must be prepared
+   automatically. Verify `sync` precedes view/private unmounts, the still
+   visible old `DISKSEQ` stays `EJECTED`, physical removal clears the session,
+   and reinsertion under any `/dev/sdX` returns to `READY`. Also try a quick
+   reconnect and confirm a changed `DISKSEQ` releases the latch.
 11. Inspect malformed/unknown CDC commands and a line over 255 bytes; confirm a
    bounded `ERR` response and continued reconnect/service operation.
 
-For the PS1 and later Dreamcast performance run, enable RetroArch's on-screen
-FPS display, establish a no-recording baseline in the same scene, then start a
-fresh session with replay enabled. From SSH, collect the encoder load and log:
+For developer diagnosis only, enable RetroArch's on-screen FPS display,
+establish a no-recording baseline in the same scene, then start a fresh session
+with the experimental flag enabled. From SSH, collect the encoder load and log:
 
 ```sh
 while pidof ffmpeg >/dev/null 2>&1; do
@@ -852,10 +1127,8 @@ ffprobe -v error \
     -of default=noprint_wrappers=1 "$clip"
 ```
 
-Compare baseline and replay FPS for at least five minutes, trigger LONG twice
-at separate moments, play both clips on a normal PC, and listen for continuous
-game audio. Keep Dreamcast in `R4_REPLAY_DISABLED_SYSTEMS` unless this test
-passes without turning gameplay into a slideshow.
+This procedure documents the unsupported path; it is not a release acceptance
+test on Orange Pi 3 LTS.
 
 ## Supported firmware
 
@@ -887,8 +1160,13 @@ The integration creates temporary state files:
 /tmp/r4-controller-service.pid
 /tmp/r4-controller-service.state
 /tmp/r4-controller-led-mode
+/tmp/r4-game-running
 /tmp/r4-game-card/
-/tmp/r4-replay-state/
+/tmp/r4-replay-state/waiter.pid
+/tmp/r4-replay-state/encoder.pid
+/tmp/r4-replay-state/monitor.pid
+/tmp/r4-replay-state/session
+/tmp/r4-replay-state/status
 /tmp/r4-replay/
 ```
 
@@ -916,10 +1194,13 @@ The current prototype does not yet include:
 - a selected OLED model, resolution or physical display driver;
 - battery and power telemetry.
 
-Replay support is implemented in software, but its gameplay FPS/CPU impact,
-PS1 quality, Dreamcast viability and long-duration stability are not yet
-hardware-verified. The physical Game Card reader/card and its real-media bind
-mount/eject behavior are also still unverified.
+Instant Replay is unsupported and disabled by default on Orange Pi 3 LTS
+because the board exposes H.264 decoders but no usable hardware encoder, and
+software capture has unacceptable frame rate and CPU cost. The implementation
+is retained only behind the explicit experimental flag for future boards. The
+physical Game Card layout and eject path are verified;
+automatic FUSE recovery after reboot and a deliberately fast physical
+reconnect still need the final on-device pass.
 
 All four external RP2040 ADC channels are already occupied by the two analog sticks.
 
