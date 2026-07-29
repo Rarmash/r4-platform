@@ -6,6 +6,8 @@ R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp}"
 ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
 LED_STATE="${R4_LED_STATE:-$R4_DATA_DIR/r4-led-state}"
 OLED_TCP="${R4_OLED_TCP:-$R4_DATA_DIR/r4-oled-tcp}"
+BATOCERA_SCREENSHOT="${R4_BATOCERA_SCREENSHOT:-batocera-screenshot}"
+REPLAY="${R4_REPLAY_MANAGER:-$R4_DATA_DIR/r4-replay}"
 
 PID_FILE="$R4_RUNTIME_DIR/r4-controller-service.pid"
 STATE_FILE="$R4_RUNTIME_DIR/r4-controller-service.state"
@@ -15,6 +17,7 @@ OLED_TCP_PID_FILE="$R4_RUNTIME_DIR/r4-oled-tcp.pid"
 LOG_FILE="${R4_LOG_FILE:-$R4_DATA_DIR/r4-controller.log}"
 VERSION_CONFIG_FILE="$R4_DATA_DIR/firmware-version.conf"
 OLED_TCP_CONFIG_FILE="$R4_DATA_DIR/oled-tcp.conf"
+GAME_CARD_STATE_FILE="${R4_GAME_CARD_STATE_FILE:-/tmp/r4-game-card/state}"
 
 CHECK_INTERVAL=2
 BROKER_POLL_INTERVAL=0.05
@@ -123,6 +126,21 @@ send_host_telemetry() {
         "VOLUME=$system_volume" \
         >/dev/null 2>&1 ||
         true
+}
+
+sync_game_card_state() {
+    [ -f "$GAME_CARD_STATE_FILE" ] || return 0
+
+    game_card_state="$(cat "$GAME_CARD_STATE_FILE" 2>/dev/null)" ||
+        return 0
+
+    case "$game_card_state" in
+        INSERTED|READY|BUSY|EJECTED|ERROR)
+            controller_command HOST CARD "STATE=$game_card_state" \
+                >/dev/null 2>&1 ||
+                true
+            ;;
+    esac
 }
 
 process_broker_requests() {
@@ -294,6 +312,98 @@ event_field() {
         head -n 1
 }
 
+capture_screenshot() {
+    capture_sequence="$1"
+
+    controller_command HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY \
+        >/dev/null 2>&1 ||
+        true
+
+    if [ -x "$REPLAY" ]; then
+        capture_output="$("$REPLAY" screenshot "$capture_sequence" 2>&1)"
+        capture_status=$?
+        if [ "$capture_status" -eq 0 ]; then
+            capture_result="SAVED"
+            capture_detail="${capture_output#SAVED }"
+        else
+            capture_result="ERROR"
+            capture_detail="storage-or-command-failed"
+        fi
+    elif ! command -v "$BATOCERA_SCREENSHOT" >/dev/null 2>&1; then
+        capture_result="ERROR"
+        capture_detail="command-missing"
+    elif "$BATOCERA_SCREENSHOT" >/dev/null 2>&1; then
+        capture_result="SAVED"
+        capture_detail="saved"
+    else
+        capture_result="ERROR"
+        capture_detail="command-failed"
+    fi
+
+    controller_command \
+        HOST CAPTURE TYPE=SCREENSHOT "STATUS=$capture_result" \
+        >/dev/null 2>&1 ||
+        true
+
+    if [ "$capture_result" = "SAVED" ]; then
+        controller_command LED FLASH 0 32 0 500 \
+            >/dev/null 2>&1 ||
+            true
+    else
+        controller_command LED FLASH 32 0 0 700 \
+            >/dev/null 2>&1 ||
+            true
+    fi
+
+    log_message \
+        "Capture short event seq=$capture_sequence result=$capture_result detail=$capture_detail"
+}
+
+capture_clip() {
+    clip_sequence="$1"
+
+    if [ ! -x "$REPLAY" ]; then
+        clip_result="UNAVAILABLE"
+        clip_detail="manager-missing"
+    else
+        clip_output="$("$REPLAY" save "$clip_sequence" 2>&1)"
+        clip_status=$?
+        case "$clip_status:$clip_output" in
+            0:ACCEPTED)
+                controller_command \
+                    HOST CAPTURE TYPE=CLIP STATUS=SAVING \
+                    >/dev/null 2>&1 ||
+                    true
+                controller_command LED FLASH 24 12 0 700 \
+                    >/dev/null 2>&1 ||
+                    true
+                log_message \
+                    "Capture long event seq=$clip_sequence result=ACCEPTED"
+                return 0
+                ;;
+            2:BUSY)
+                log_message \
+                    "Capture long event seq=$clip_sequence result=BUSY detail=save-already-running"
+                return 0
+                ;;
+            *)
+                clip_result="UNAVAILABLE"
+                clip_detail="${clip_output:-replay-not-buffering}"
+                ;;
+        esac
+    fi
+
+    controller_command \
+        HOST CAPTURE TYPE=CLIP "STATUS=$clip_result" \
+        >/dev/null 2>&1 ||
+        true
+    controller_command LED FLASH 32 0 0 900 \
+        >/dev/null 2>&1 ||
+        true
+    log_message \
+        "Capture long event seq=$clip_sequence result=$clip_result detail=$clip_detail"
+}
+
 dispatch_controller_event() {
     event_line="$1"
 
@@ -318,13 +428,11 @@ dispatch_controller_event() {
 
     case "$event_button:$event_action" in
         CAPTURE:SHORT)
-            log_message \
-                "Capture short event seq=$event_sequence: screenshot action is not wired yet"
+            capture_screenshot "$event_sequence"
             ;;
 
         CAPTURE:LONG)
-            log_message \
-                "Capture long event seq=$event_sequence: recording action stub"
+            capture_clip "$event_sequence"
             ;;
 
         TROPHY:SHORT)
@@ -473,6 +581,7 @@ run_watchdog() {
                         controller_command HOST STATE MODE=HOME \
                             >/dev/null 2>&1 ||
                             true
+                        sync_game_card_state
 
                         if [ -x "$LED_STATE" ]; then
                             R4_ECCTL_DIRECT=1 \

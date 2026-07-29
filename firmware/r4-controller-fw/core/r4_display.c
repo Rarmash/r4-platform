@@ -279,6 +279,7 @@ void r4_display_model_init(r4_display_model_t *model) {
     memset(model, 0, sizeof(*model));
     model->screen = R4_DISPLAY_BOOT;
     model->clock_colon_visible = true;
+    snprintf(model->card_state, sizeof(model->card_state), "EJECTED");
 }
 
 void r4_display_show_achievement(
@@ -292,6 +293,26 @@ void r4_display_show_achievement(
     model->achievement_visible = true;
     model->achievement_hide_at_ms =
         now_ms + R4_DISPLAY_ACHIEVEMENT_DURATION_MS;
+}
+
+void r4_display_show_notification(
+    r4_display_model_t *model,
+    const char *text,
+    uint32_t now_ms
+) {
+    if (model == NULL || text == NULL || text[0] == '\0') {
+        return;
+    }
+
+    snprintf(
+        model->notification,
+        sizeof(model->notification),
+        "%s",
+        text
+    );
+    model->notification_visible = true;
+    model->notification_hide_at_ms =
+        now_ms + R4_DISPLAY_NOTIFICATION_DURATION_MS;
 }
 
 void r4_display_start_game(
@@ -373,6 +394,14 @@ void r4_display_tick(
             UINT32_C(0x80000000)
     ) {
         model->achievement_visible = false;
+    }
+
+    if (
+        model->notification_visible &&
+        now_ms - model->notification_hide_at_ms <
+            UINT32_C(0x80000000)
+    ) {
+        model->notification_visible = false;
     }
 
     if (model->game_timer_running) {
@@ -634,14 +663,32 @@ bool r4_display_render(
         case R4_DISPLAY_HOME: {
             render_status_bar(model, framebuffer);
             draw_text(framebuffer, 53, 13, "R4", 2, 2);
-            draw_text(framebuffer, 17, 32, "BATOCERA", 2, 8);
+            draw_text(framebuffer, 17, 29, "BATOCERA", 2, 8);
+            char card[22];
+            snprintf(
+                card,
+                sizeof(card),
+                "CARD %.15s",
+                model->card_state
+            );
+            draw_text(framebuffer, 2, 44, card, 1, 20);
             render_footer(model, framebuffer, false);
             break;
         }
 
         case R4_DISPLAY_GAME:
             render_status_bar(model, framebuffer);
-            draw_text(framebuffer, 3, 13, model->system, 1, 20);
+            draw_text(
+                framebuffer,
+                3,
+                13,
+                model->system,
+                1,
+                model->replay_buffering ? 16 : 20
+            );
+            if (model->replay_buffering) {
+                draw_text(framebuffer, 109, 13, "RPL", 1, 3);
+            }
             draw_wrapped_text(
                 framebuffer,
                 3,
@@ -711,6 +758,34 @@ bool r4_display_render(
                 20
             );
             break;
+    }
+
+    if (model->notification_visible) {
+        const int popup_height = 22;
+        const int popup_y = framebuffer->height - popup_height;
+
+        for (int y = popup_y; y < framebuffer->height; ++y) {
+            for (int x = 0; x < framebuffer->width; ++x) {
+                set_pixel(framebuffer, x, y, false);
+            }
+        }
+
+        draw_rect(
+            framebuffer,
+            0,
+            popup_y,
+            framebuffer->width,
+            popup_height,
+            false
+        );
+        draw_text(
+            framebuffer,
+            3,
+            popup_y + 8,
+            model->notification,
+            1,
+            20
+        );
     }
 
     if (model->achievement_visible) {

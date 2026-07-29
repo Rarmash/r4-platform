@@ -1,0 +1,864 @@
+#!/bin/sh
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_REPLAY_STATE_DIR="${R4_REPLAY_STATE_DIR:-/tmp/r4-replay-state}"
+CONFIG_FILE="${R4_REPLAY_CONFIG:-$R4_DATA_DIR/replay.conf}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+GAME_CARD="${R4_GAME_CARD_MANAGER:-$R4_DATA_DIR/r4-game-card}"
+FFMPEG="${R4_FFMPEG:-ffmpeg}"
+FFPROBE="${R4_FFPROBE:-ffprobe}"
+SCREENSHOT="${R4_BATOCERA_SCREENSHOT:-batocera-screenshot}"
+DF="${R4_DF:-df}"
+LOG_FILE="${R4_REPLAY_LOG:-$R4_DATA_DIR/r4-replay.log}"
+
+PID_FILE="$R4_REPLAY_STATE_DIR/encoder.pid"
+MONITOR_PID_FILE="$R4_REPLAY_STATE_DIR/monitor.pid"
+STATUS_FILE="$R4_REPLAY_STATE_DIR/status"
+SYSTEM_FILE="$R4_REPLAY_STATE_DIR/system"
+GAME_FILE="$R4_REPLAY_STATE_DIR/game"
+ROM_FILE="$R4_REPLAY_STATE_DIR/rom"
+SAVE_LOCK="$R4_REPLAY_STATE_DIR/save.lock"
+STOP_REQUEST="$R4_REPLAY_STATE_DIR/stop-request"
+
+fail() {
+    echo "r4-replay: $*" >&2
+    return 1
+}
+
+log_message() {
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+        >> "$LOG_FILE" 2>/dev/null ||
+        true
+}
+
+integer_in_range() {
+    integer_name="$1"
+    integer_value="$2"
+    integer_min="$3"
+    integer_max="$4"
+
+    case "$integer_value" in
+        ''|*[!0-9]*)
+            fail "$integer_name must be an integer"
+            return 1
+            ;;
+    esac
+    if [ "$integer_value" -lt "$integer_min" ] ||
+       [ "$integer_value" -gt "$integer_max" ]; then
+        fail "$integer_name must be in $integer_min..$integer_max"
+        return 1
+    fi
+}
+
+validate_directory() {
+    directory_name="$1"
+    directory_value="$2"
+
+    case "$directory_value" in
+        ''|*[!A-Za-z0-9/._-]*|*/../*|*/..|*/./*|*/.|*//*)
+            fail "$directory_name is not a safe absolute path"
+            return 1
+            ;;
+    esac
+    [ "${directory_value#/}" != "$directory_value" ] || {
+        fail "$directory_name must be absolute"
+        return 1
+    }
+}
+
+load_config() {
+    R4_REPLAY_ENABLED=""
+    R4_REPLAY_SECONDS=""
+    R4_REPLAY_SEGMENT_SECONDS=""
+    R4_REPLAY_BUFFER_DIR=""
+    R4_REPLAY_MAX_BUFFER_MB=""
+    R4_REPLAY_FPS=""
+    R4_REPLAY_MAX_WIDTH=""
+    R4_REPLAY_VIDEO_BITRATE=""
+    R4_REPLAY_VIDEO_PRESET=""
+    R4_REPLAY_AUDIO_ENABLED=""
+    R4_REPLAY_DISABLED_SYSTEMS=""
+    R4_CAPTURE_STORAGE=""
+    R4_CAPTURE_MIN_FREE_MB=""
+    R4_CAPTURE_FALLBACK_INTERNAL=""
+    R4_CAPTURE_INTERNAL_SCREENSHOTS=""
+    R4_CAPTURE_INTERNAL_VIDEOS=""
+
+    [ -f "$CONFIG_FILE" ] ||
+        fail "configuration is missing: $CONFIG_FILE" ||
+        return 1
+
+    while IFS= read -r config_line || [ -n "$config_line" ]; do
+        case "$config_line" in
+            R4_REPLAY_ENABLED=*)
+                R4_REPLAY_ENABLED="${config_line#*=}" ;;
+            R4_REPLAY_SECONDS=*)
+                R4_REPLAY_SECONDS="${config_line#*=}" ;;
+            R4_REPLAY_SEGMENT_SECONDS=*)
+                R4_REPLAY_SEGMENT_SECONDS="${config_line#*=}" ;;
+            R4_REPLAY_BUFFER_DIR=*)
+                R4_REPLAY_BUFFER_DIR="${config_line#*=}" ;;
+            R4_REPLAY_MAX_BUFFER_MB=*)
+                R4_REPLAY_MAX_BUFFER_MB="${config_line#*=}" ;;
+            R4_REPLAY_FPS=*)
+                R4_REPLAY_FPS="${config_line#*=}" ;;
+            R4_REPLAY_MAX_WIDTH=*)
+                R4_REPLAY_MAX_WIDTH="${config_line#*=}" ;;
+            R4_REPLAY_VIDEO_BITRATE=*)
+                R4_REPLAY_VIDEO_BITRATE="${config_line#*=}" ;;
+            R4_REPLAY_VIDEO_PRESET=*)
+                R4_REPLAY_VIDEO_PRESET="${config_line#*=}" ;;
+            R4_REPLAY_AUDIO_ENABLED=*)
+                R4_REPLAY_AUDIO_ENABLED="${config_line#*=}" ;;
+            R4_REPLAY_DISABLED_SYSTEMS=*)
+                R4_REPLAY_DISABLED_SYSTEMS="${config_line#*=}" ;;
+            R4_CAPTURE_STORAGE=*)
+                R4_CAPTURE_STORAGE="${config_line#*=}" ;;
+            R4_CAPTURE_MIN_FREE_MB=*)
+                R4_CAPTURE_MIN_FREE_MB="${config_line#*=}" ;;
+            R4_CAPTURE_FALLBACK_INTERNAL=*)
+                R4_CAPTURE_FALLBACK_INTERNAL="${config_line#*=}" ;;
+            R4_CAPTURE_INTERNAL_SCREENSHOTS=*)
+                R4_CAPTURE_INTERNAL_SCREENSHOTS="${config_line#*=}" ;;
+            R4_CAPTURE_INTERNAL_VIDEOS=*)
+                R4_CAPTURE_INTERNAL_VIDEOS="${config_line#*=}" ;;
+            ''|'#'*) ;;
+            *)
+                fail "invalid configuration entry: $config_line"
+                return 1
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+
+    case "$R4_REPLAY_ENABLED:$R4_REPLAY_AUDIO_ENABLED:$R4_CAPTURE_FALLBACK_INTERNAL" in
+        [01]:[01]:[01]) ;;
+        *)
+            fail "replay/audio/fallback flags must be 0 or 1"
+            return 1
+            ;;
+    esac
+
+    integer_in_range R4_REPLAY_SECONDS \
+        "$R4_REPLAY_SECONDS" 5 120 || return 1
+    integer_in_range R4_REPLAY_SEGMENT_SECONDS \
+        "$R4_REPLAY_SEGMENT_SECONDS" 1 10 || return 1
+    [ "$R4_REPLAY_SEGMENT_SECONDS" -le "$R4_REPLAY_SECONDS" ] || {
+        fail "segment duration cannot exceed replay duration"
+        return 1
+    }
+    integer_in_range R4_REPLAY_MAX_BUFFER_MB \
+        "$R4_REPLAY_MAX_BUFFER_MB" 16 1024 || return 1
+    integer_in_range R4_REPLAY_FPS \
+        "$R4_REPLAY_FPS" 10 60 || return 1
+    integer_in_range R4_REPLAY_MAX_WIDTH \
+        "$R4_REPLAY_MAX_WIDTH" 320 3840 || return 1
+    integer_in_range R4_REPLAY_VIDEO_BITRATE \
+        "$R4_REPLAY_VIDEO_BITRATE" 250000 20000000 || return 1
+    integer_in_range R4_CAPTURE_MIN_FREE_MB \
+        "$R4_CAPTURE_MIN_FREE_MB" 1 1048576 || return 1
+
+    case "$R4_REPLAY_VIDEO_PRESET" in
+        ultrafast|superfast|veryfast) ;;
+        *)
+            fail "unsupported libx264 preset"
+            return 1
+            ;;
+    esac
+    case "$R4_REPLAY_DISABLED_SYSTEMS" in
+        *[!A-Za-z0-9,._-]*)
+            fail "R4_REPLAY_DISABLED_SYSTEMS contains unsafe characters"
+            return 1
+            ;;
+    esac
+    case "$R4_CAPTURE_STORAGE" in
+        auto|card|internal) ;;
+        *)
+            fail "R4_CAPTURE_STORAGE must be auto, card or internal"
+            return 1
+            ;;
+    esac
+
+    validate_directory R4_REPLAY_BUFFER_DIR \
+        "$R4_REPLAY_BUFFER_DIR" || return 1
+    validate_directory R4_CAPTURE_INTERNAL_SCREENSHOTS \
+        "$R4_CAPTURE_INTERNAL_SCREENSHOTS" || return 1
+    validate_directory R4_CAPTURE_INTERNAL_VIDEOS \
+        "$R4_CAPTURE_INTERNAL_VIDEOS" || return 1
+
+    case "$R4_REPLAY_BUFFER_DIR" in
+        /|/tmp|/userdata|/userdata/system)
+            fail "R4_REPLAY_BUFFER_DIR is too broad"
+            return 1
+            ;;
+    esac
+
+    BUFFER_CURRENT="$R4_REPLAY_BUFFER_DIR/current"
+    REPLAY_SEGMENT_COUNT=$(((
+        R4_REPLAY_SECONDS +
+        R4_REPLAY_SEGMENT_SECONDS - 1
+    ) / R4_REPLAY_SEGMENT_SECONDS))
+    REPLAY_WRAP_COUNT=$((REPLAY_SEGMENT_COUNT + 2))
+}
+
+set_status() {
+    mkdir -p "$R4_REPLAY_STATE_DIR" || return 1
+    printf '%s\n' "$1" > "$STATUS_FILE"
+}
+
+current_status() {
+    if [ -f "$STATUS_FILE" ]; then
+        cat "$STATUS_FILE"
+    else
+        echo IDLE
+    fi
+}
+
+read_value() {
+    if [ -f "$1" ]; then
+        sed -n '1p' "$1"
+    fi
+}
+
+sanitize_name() {
+    sanitized="$(
+        printf '%s' "$1" |
+            tr '\r\n' '  ' |
+            tr -cs 'A-Za-z0-9._-' '_' |
+            sed 's/^_*//; s/_*$//' |
+            cut -c 1-48
+    )"
+    [ -n "$sanitized" ] || sanitized=unknown
+    printf '%s\n' "$sanitized"
+}
+
+backend_available() {
+    command -v "$FFMPEG" >/dev/null 2>&1 &&
+        [ -e /dev/dri/card0 -o "${R4_REPLAY_TEST_BACKEND:-0}" = "1" ]
+}
+
+system_disabled() {
+    disabled_system="$1"
+    case ",$R4_REPLAY_DISABLED_SYSTEMS," in
+        *,"$disabled_system",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+encoder_is_running() {
+    [ -f "$PID_FILE" ] || return 1
+    encoder_pid="$(cat "$PID_FILE" 2>/dev/null)"
+    [ -n "$encoder_pid" ] &&
+        kill -0 "$encoder_pid" 2>/dev/null
+}
+
+feedback() {
+    feedback_status="$1"
+
+    R4_ECCTL_BROKER_ONLY=1 \
+        "$ECCTL" HOST CAPTURE TYPE=CLIP "STATUS=$feedback_status" \
+        >/dev/null 2>&1 ||
+        true
+
+    case "$feedback_status" in
+        SAVING)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 24 12 0 700 >/dev/null 2>&1 ||
+                true
+            ;;
+        SAVED)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 0 32 0 700 >/dev/null 2>&1 ||
+                true
+            ;;
+        ERROR|UNAVAILABLE)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 32 0 0 900 >/dev/null 2>&1 ||
+                true
+            ;;
+    esac
+}
+
+trim_buffer() {
+    [ -d "$BUFFER_CURRENT" ] || return 0
+    limit_kb=$((R4_REPLAY_MAX_BUFFER_MB * 1024))
+
+    while true; do
+        buffer_kb="$(
+            du -sk "$BUFFER_CURRENT" 2>/dev/null |
+                awk 'NR == 1 { print $1 }'
+        )"
+        : "${buffer_kb:=0}"
+        [ "$buffer_kb" -le "$limit_kb" ] && break
+
+        set -- "$BUFFER_CURRENT"/segment-*.ts
+        [ -e "$1" ] || break
+        segment_total=$#
+        [ "$segment_total" -gt 2 ] || break
+        oldest_segment="$(
+            ls -1tr "$BUFFER_CURRENT"/segment-*.ts 2>/dev/null |
+                sed -n '1p'
+        )"
+        [ -n "$oldest_segment" ] || break
+        rm -f "$oldest_segment"
+        log_message \
+            "trimmed replay segment=$(basename "$oldest_segment") limit_mb=$R4_REPLAY_MAX_BUFFER_MB"
+    done
+}
+
+monitor_encoder() {
+    watched_pid="$1"
+    while kill -0 "$watched_pid" 2>/dev/null; do
+        trim_buffer
+        sleep "$R4_REPLAY_SEGMENT_SECONDS"
+    done
+}
+
+launch_encoder() {
+    mkdir -p "$R4_REPLAY_STATE_DIR" "$BUFFER_CURRENT" ||
+        return 1
+    rm -f "$BUFFER_CURRENT"/segment-*.ts
+
+    gop_size=$((R4_REPLAY_FPS * R4_REPLAY_SEGMENT_SECONDS))
+    buffer_rate=$((R4_REPLAY_VIDEO_BITRATE * 2))
+    video_filter="hwdownload,format=bgr0,scale=min(iw\\,$R4_REPLAY_MAX_WIDTH):-2,format=yuv420p"
+
+    if [ "$R4_REPLAY_AUDIO_ENABLED" = "1" ]; then
+        nohup "$FFMPEG" \
+            -hide_banner -loglevel warning -nostdin -y \
+            -thread_queue_size 512 \
+            -f kmsgrab -framerate "$R4_REPLAY_FPS" -i - \
+            -thread_queue_size 512 \
+            -f pulse -i @DEFAULT_MONITOR@ \
+            -map 0:v:0 -map 1:a:0 \
+            -vf "$video_filter" \
+            -c:v libx264 \
+            -preset "$R4_REPLAY_VIDEO_PRESET" \
+            -tune zerolatency \
+            -b:v "$R4_REPLAY_VIDEO_BITRATE" \
+            -maxrate "$R4_REPLAY_VIDEO_BITRATE" \
+            -bufsize "$buffer_rate" \
+            -g "$gop_size" \
+            -keyint_min "$gop_size" \
+            -sc_threshold 0 \
+            -af aresample=async=1:first_pts=0 \
+            -c:a aac -b:a 128k \
+            -f segment \
+            -segment_time "$R4_REPLAY_SEGMENT_SECONDS" \
+            -segment_time_delta 0.05 \
+            -segment_wrap "$REPLAY_WRAP_COUNT" \
+            -reset_timestamps 1 \
+            "$BUFFER_CURRENT/segment-%03d.ts" \
+            >> "$LOG_FILE" 2>&1 &
+    else
+        nohup "$FFMPEG" \
+            -hide_banner -loglevel warning -nostdin -y \
+            -thread_queue_size 512 \
+            -f kmsgrab -framerate "$R4_REPLAY_FPS" -i - \
+            -map 0:v:0 \
+            -vf "$video_filter" \
+            -c:v libx264 \
+            -preset "$R4_REPLAY_VIDEO_PRESET" \
+            -tune zerolatency \
+            -b:v "$R4_REPLAY_VIDEO_BITRATE" \
+            -maxrate "$R4_REPLAY_VIDEO_BITRATE" \
+            -bufsize "$buffer_rate" \
+            -g "$gop_size" \
+            -keyint_min "$gop_size" \
+            -sc_threshold 0 \
+            -an \
+            -f segment \
+            -segment_time "$R4_REPLAY_SEGMENT_SECONDS" \
+            -segment_time_delta 0.05 \
+            -segment_wrap "$REPLAY_WRAP_COUNT" \
+            -reset_timestamps 1 \
+            "$BUFFER_CURRENT/segment-%03d.ts" \
+            >> "$LOG_FILE" 2>&1 &
+    fi
+
+    encoder_pid=$!
+    printf '%s\n' "$encoder_pid" > "$PID_FILE"
+    launch_check=0
+    while [ "$launch_check" -lt 4 ]; do
+        sleep 0.5
+        if ! kill -0 "$encoder_pid" 2>/dev/null; then
+            rm -f "$PID_FILE"
+            return 1
+        fi
+        launch_check=$((launch_check + 1))
+    done
+
+    "$0" monitor "$encoder_pid" >/dev/null 2>&1 &
+    printf '%s\n' "$!" > "$MONITOR_PID_FILE"
+}
+
+stop_encoder() {
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        monitor_pid="$(cat "$MONITOR_PID_FILE" 2>/dev/null)"
+        [ -z "$monitor_pid" ] ||
+            kill "$monitor_pid" 2>/dev/null ||
+            true
+    fi
+    rm -f "$MONITOR_PID_FILE"
+
+    if encoder_is_running; then
+        kill "$encoder_pid" 2>/dev/null || true
+        stop_attempt=0
+        while kill -0 "$encoder_pid" 2>/dev/null; do
+            stop_attempt=$((stop_attempt + 1))
+            if [ "$stop_attempt" -ge 50 ]; then
+                kill -9 "$encoder_pid" 2>/dev/null || true
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+    rm -f "$PID_FILE"
+}
+
+start_replay() {
+    replay_system="$(sanitize_name "$1")"
+    replay_rom="$(sanitize_name "$2")"
+    replay_game="$(sanitize_name "$3")"
+
+    stop_encoder
+    rm -f "$STOP_REQUEST"
+    rm -rf "$R4_REPLAY_BUFFER_DIR"
+    mkdir -p "$BUFFER_CURRENT" "$R4_REPLAY_STATE_DIR" ||
+        return 1
+    printf '%s\n' "$replay_system" > "$SYSTEM_FILE"
+    printf '%s\n' "$replay_game" > "$GAME_FILE"
+    printf '%s\n' "$replay_rom" > "$ROM_FILE"
+
+    if [ "$R4_REPLAY_ENABLED" != "1" ] ||
+       system_disabled "$replay_system" ||
+       ! backend_available; then
+        set_status UNAVAILABLE
+        log_message \
+            "replay unavailable backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
+        return 2
+    fi
+
+    if launch_encoder; then
+        set_status BUFFERING
+        feedback BUFFERING
+        log_message \
+            "replay buffering backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game seconds=$R4_REPLAY_SECONDS segment_seconds=$R4_REPLAY_SEGMENT_SECONDS fps=$R4_REPLAY_FPS max_width=$R4_REPLAY_MAX_WIDTH bitrate=$R4_REPLAY_VIDEO_BITRATE audio=$R4_REPLAY_AUDIO_ENABLED"
+        return 0
+    fi
+
+    set_status UNAVAILABLE
+    log_message \
+        "replay unavailable reason=encoder-start-failed backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
+    return 2
+}
+
+stop_replay() {
+    : > "$STOP_REQUEST"
+    stop_encoder
+    if [ -d "$SAVE_LOCK" ]; then
+        set_status SAVING
+        log_message "replay stop requested while clip finalizes"
+    else
+        rm -rf "$R4_REPLAY_BUFFER_DIR" "$SAVE_LOCK"
+        rm -f "$STOP_REQUEST"
+        set_status IDLE
+        log_message "replay stopped"
+    fi
+}
+
+free_megabytes() {
+    "$DF" -Pm "$1" 2>/dev/null |
+        awk 'NR == 2 { print $4 }'
+}
+
+has_free_space() {
+    free_mb="$(free_megabytes "$1")"
+    case "$free_mb" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$free_mb" -ge "$R4_CAPTURE_MIN_FREE_MB" ]
+}
+
+choose_capture_directory() {
+    capture_kind="$1"
+    selected_directory=""
+    selected_storage=""
+
+    if [ "$R4_CAPTURE_STORAGE" != "internal" ] &&
+       [ -x "$GAME_CARD" ]; then
+        selected_directory="$(
+            "$GAME_CARD" capture-dir "$capture_kind" 2>/dev/null
+        )" || selected_directory=""
+        if [ -n "$selected_directory" ] &&
+           has_free_space "$selected_directory"; then
+            selected_storage=card
+        else
+            selected_directory=""
+        fi
+    fi
+
+    if [ -z "$selected_directory" ]; then
+        if [ "$R4_CAPTURE_STORAGE" = "card" ] &&
+           [ "$R4_CAPTURE_FALLBACK_INTERNAL" != "1" ]; then
+            return 1
+        fi
+        if [ "$R4_CAPTURE_STORAGE" = "auto" ] ||
+           [ "$R4_CAPTURE_STORAGE" = "internal" ] ||
+           [ "$R4_CAPTURE_FALLBACK_INTERNAL" = "1" ]; then
+            case "$capture_kind" in
+                screenshots)
+                    selected_directory="$R4_CAPTURE_INTERNAL_SCREENSHOTS" ;;
+                videos)
+                    selected_directory="$R4_CAPTURE_INTERNAL_VIDEOS" ;;
+                *) return 1 ;;
+            esac
+            mkdir -p "$selected_directory" || return 1
+            has_free_space "$selected_directory" || return 1
+            selected_storage=internal
+        fi
+    fi
+
+    [ -n "$selected_directory" ] || return 1
+    printf '%s|%s\n' "$selected_storage" "$selected_directory"
+}
+
+capture_basename() {
+    capture_type="$1"
+    capture_system="$(read_value "$SYSTEM_FILE")"
+    capture_game="$(read_value "$GAME_FILE")"
+    : "${capture_system:=home}"
+    : "${capture_game:=r4}"
+    printf '%s-%s-%s-%s' \
+        "$(date '+%Y%m%d-%H%M%S')" \
+        "$(sanitize_name "$capture_system")" \
+        "$(sanitize_name "$capture_game")" \
+        "$capture_type"
+}
+
+capture_screenshot() {
+    capture_sequence="$1"
+    command -v "$SCREENSHOT" >/dev/null 2>&1 ||
+        return 1
+
+    destination="$(choose_capture_directory screenshots)" ||
+        return 1
+    storage="${destination%%|*}"
+    directory="${destination#*|}"
+    owner="capture-screenshot"
+
+    if [ "$storage" = "card" ]; then
+        R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
+            "$GAME_CARD" busy-add "$owner" >/dev/null 2>&1 ||
+            return 1
+    fi
+
+    base="$(
+        capture_basename screenshot
+    )-$(sanitize_name "$capture_sequence")"
+    final_path="$directory/$base.pbm"
+    temporary_path="$directory/.$base.tmp"
+    rm -f "$temporary_path"
+
+    if "$SCREENSHOT" "$temporary_path" >/dev/null 2>&1 &&
+       [ -s "$temporary_path" ] &&
+       mv "$temporary_path" "$final_path"; then
+        if [ "$storage" = "card" ]; then
+            R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
+                "$GAME_CARD" busy-remove "$owner" >/dev/null 2>&1 ||
+                true
+        fi
+        log_message \
+            "screenshot result=SAVED seq=$capture_sequence storage=$storage path=$final_path"
+        printf 'SAVED %s\n' "$final_path"
+        return 0
+    fi
+
+    rm -f "$temporary_path"
+    if [ "$storage" = "card" ]; then
+        R4_GAME_CARD_SUPPRESS_NOTIFY=1 \
+            "$GAME_CARD" operation-error \
+            "$owner" screenshot-write-failed >/dev/null 2>&1 ||
+            true
+    fi
+    log_message \
+        "screenshot result=ERROR seq=$capture_sequence storage=$storage reason=write-failed"
+    return 1
+}
+
+write_concat_list() {
+    snapshot_dir="$1"
+    concat_list="$2"
+    selected_list="$snapshot_dir/selected.list"
+
+    ls -1tr "$snapshot_dir"/segment-*.ts 2>/dev/null |
+        tail -n "$REPLAY_SEGMENT_COUNT" \
+        > "$selected_list"
+    [ -s "$selected_list" ] || return 1
+
+    : > "$concat_list"
+    while IFS= read -r segment_path; do
+        printf "file '%s'\n" "$segment_path" >> "$concat_list"
+    done < "$selected_list"
+}
+
+restart_after_snapshot() {
+    [ ! -f "$STOP_REQUEST" ] || return 1
+    sleep 0.5
+    mkdir -p "$BUFFER_CURRENT" || return 1
+    launch_encoder
+}
+
+restore_after_save() {
+    restore_restarted="$1"
+
+    if [ -f "$STOP_REQUEST" ]; then
+        stop_encoder
+        rm -rf "$R4_REPLAY_BUFFER_DIR"
+        rm -f "$STOP_REQUEST"
+        set_status IDLE
+    elif [ "$restore_restarted" -eq 1 ]; then
+        set_status BUFFERING
+        feedback BUFFERING
+    else
+        set_status ERROR
+    fi
+}
+
+finish_card_owner() {
+    finish_storage="$1"
+    finish_owner="$2"
+    finish_success="$3"
+
+    [ "$finish_storage" = "card" ] || return 0
+    if [ "$finish_success" = "1" ]; then
+        "$GAME_CARD" busy-remove "$finish_owner" >/dev/null 2>&1 ||
+            true
+    else
+        "$GAME_CARD" operation-error \
+            "$finish_owner" clip-write-failed >/dev/null 2>&1 ||
+            true
+    fi
+}
+
+validate_clip() {
+    clip_path="$1"
+
+    if ! command -v "$FFPROBE" >/dev/null 2>&1; then
+        log_message \
+            "clip validation=SKIPPED reason=ffprobe-unavailable path=$clip_path"
+        return 0
+    fi
+
+    video_codec="$(
+        "$FFPROBE" -v error \
+            -select_streams v:0 \
+            -show_entries stream=codec_type \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$clip_path" 2>/dev/null
+    )"
+    [ "$video_codec" = "video" ] || return 1
+
+    if [ "$R4_REPLAY_AUDIO_ENABLED" = "1" ]; then
+        audio_codec="$(
+            "$FFPROBE" -v error \
+                -select_streams a:0 \
+                -show_entries stream=codec_type \
+                -of default=noprint_wrappers=1:nokey=1 \
+                "$clip_path" 2>/dev/null
+        )"
+        [ "$audio_codec" = "audio" ] || return 1
+    fi
+}
+
+save_worker() {
+    save_sequence="$1"
+    started_at="$(date +%s)"
+    replay_system="$(read_value "$SYSTEM_FILE")"
+    replay_game="$(read_value "$GAME_FILE")"
+    snapshot_dir="$R4_REPLAY_BUFFER_DIR/snapshot-$(date +%s)-$$"
+    restarted=0
+    storage=none
+    owner=capture-clip
+    temporary_path=""
+
+    set_status SAVING
+    stop_encoder
+    if [ -d "$BUFFER_CURRENT" ]; then
+        mv "$BUFFER_CURRENT" "$snapshot_dir" || {
+            feedback ERROR
+            set_status ERROR
+            rmdir "$SAVE_LOCK" 2>/dev/null || true
+            return 1
+        }
+    fi
+    mkdir -p "$BUFFER_CURRENT"
+    if restart_after_snapshot; then
+        restarted=1
+    fi
+
+    concat_list="$snapshot_dir/concat.txt"
+    if ! write_concat_list "$snapshot_dir" "$concat_list"; then
+        feedback UNAVAILABLE
+        restore_after_save "$restarted"
+        log_message \
+            "clip result=UNAVAILABLE seq=$save_sequence reason=no-complete-segments backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
+        rm -rf "$snapshot_dir"
+        rmdir "$SAVE_LOCK" 2>/dev/null || true
+        return 1
+    fi
+
+    destination="$(choose_capture_directory videos)" || {
+        feedback ERROR
+        restore_after_save "$restarted"
+        log_message \
+            "clip result=ERROR seq=$save_sequence reason=insufficient-space-or-storage backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
+        rm -rf "$snapshot_dir"
+        rmdir "$SAVE_LOCK" 2>/dev/null || true
+        return 1
+    }
+    storage="${destination%%|*}"
+    directory="${destination#*|}"
+
+    if [ "$storage" = "card" ]; then
+        "$GAME_CARD" busy-add "$owner" >/dev/null 2>&1 || {
+            feedback ERROR
+            restore_after_save "$restarted"
+            log_message \
+                "clip result=ERROR seq=$save_sequence reason=card-busy-lock-failed backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game"
+            rm -rf "$snapshot_dir"
+            rmdir "$SAVE_LOCK" 2>/dev/null || true
+            return 1
+        }
+    fi
+
+    base="$(
+        capture_basename clip
+    )-$(sanitize_name "$save_sequence")"
+    final_path="$directory/$base.mp4"
+    temporary_path="$directory/.$base.tmp"
+    rm -f "$temporary_path"
+
+    if "$FFMPEG" \
+        -hide_banner -loglevel warning -nostdin -y \
+        -f concat -safe 0 -i "$concat_list" \
+       -c copy -movflags +faststart -f mp4 \
+       "$temporary_path" >> "$LOG_FILE" 2>&1 &&
+       [ -s "$temporary_path" ] &&
+       validate_clip "$temporary_path" &&
+       mv "$temporary_path" "$final_path"; then
+        finish_card_owner "$storage" "$owner" 1
+        size_bytes="$(wc -c < "$final_path" 2>/dev/null)"
+        duration_seconds=$(($(date +%s) - started_at))
+        feedback SAVED
+        restore_after_save "$restarted"
+        log_message \
+            "clip result=SAVED seq=$save_sequence duration_finalize_s=$duration_seconds size_bytes=$size_bytes backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game storage=$storage path=$final_path"
+        rm -rf "$snapshot_dir"
+        rmdir "$SAVE_LOCK" 2>/dev/null || true
+        return 0
+    fi
+
+    rm -f "$temporary_path"
+    finish_card_owner "$storage" "$owner" 0
+    feedback ERROR
+    restore_after_save "$restarted"
+    log_message \
+        "clip result=ERROR seq=$save_sequence reason=mux-or-finalization-failed backend=ffmpeg-kms-pulse system=$replay_system game=$replay_game storage=$storage"
+    rm -rf "$snapshot_dir"
+    rmdir "$SAVE_LOCK" 2>/dev/null || true
+    return 1
+}
+
+request_save() {
+    save_sequence="$1"
+
+    if [ "$(current_status)" != "BUFFERING" ] ||
+       ! encoder_is_running; then
+        echo UNAVAILABLE
+        return 3
+    fi
+
+    mkdir "$SAVE_LOCK" 2>/dev/null || {
+        echo BUSY
+        return 2
+    }
+
+    "$0" save-worker "$save_sequence" >/dev/null 2>&1 &
+    echo ACCEPTED
+}
+
+show_status() {
+    status="$(current_status)"
+    if encoder_is_running; then
+        running=1
+        status_pid="$encoder_pid"
+    else
+        running=0
+        status_pid=NONE
+    fi
+    printf 'STATE=%s BACKEND=ffmpeg-kms-pulse RUNNING=%s PID=%s SYSTEM=%s GAME=%s AUDIO=%s\n' \
+        "$status" \
+        "$running" \
+        "$status_pid" \
+        "$(read_value "$SYSTEM_FILE")" \
+        "$(read_value "$GAME_FILE")" \
+        "$R4_REPLAY_AUDIO_ENABLED"
+}
+
+cleanup_stale() {
+    if ! encoder_is_running; then
+        rm -rf "$R4_REPLAY_BUFFER_DIR" "$SAVE_LOCK"
+        rm -f "$PID_FILE" "$MONITOR_PID_FILE" "$STOP_REQUEST"
+        set_status IDLE
+    fi
+}
+
+command_name="${1:-}"
+load_config || exit 1
+
+case "$command_name" in
+    start)
+        [ "$#" -eq 4 ] ||
+            fail "usage: $0 start <system> <rom> <game>" ||
+            exit 1
+        start_replay "$2" "$3" "$4"
+        ;;
+    stop)
+        stop_replay
+        ;;
+    save)
+        [ "$#" -eq 2 ] ||
+            fail "usage: $0 save <event-sequence>" ||
+            exit 1
+        request_save "$2"
+        ;;
+    screenshot)
+        [ "$#" -eq 2 ] ||
+            fail "usage: $0 screenshot <event-sequence>" ||
+            exit 1
+        capture_screenshot "$2"
+        ;;
+    status)
+        show_status
+        ;;
+    cleanup)
+        cleanup_stale
+        ;;
+    trim)
+        trim_buffer
+        ;;
+    monitor)
+        [ "$#" -eq 2 ] || exit 1
+        monitor_encoder "$2"
+        ;;
+    save-worker)
+        [ "$#" -eq 2 ] || exit 1
+        save_worker "$2"
+        ;;
+    *)
+        echo \
+            "Usage: $0 {start <system> <rom> <game>|stop|save <seq>|screenshot <seq>|status|cleanup}" \
+            >&2
+        exit 1
+        ;;
+esac

@@ -8,7 +8,7 @@ include(pico_sdk_import.cmake)
 
 project(r4-controller-fw C CXX ASM)
 
-set(R4_FIRMWARE_VERSION "0.8.0")
+set(R4_FIRMWARE_VERSION "0.10.0")
 
 option(
     R4_ENABLE_TEST_INPUT

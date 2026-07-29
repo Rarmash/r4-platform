@@ -269,6 +269,86 @@ static void test_protocol_parser(void) {
     );
     CHECK(command.type == R4_COMMAND_HOST_GAME);
 
+    const char capture[] = "HOST CAPTURE STATUS=SAVED";
+    CHECK(
+        r4_protocol_parse(
+            capture,
+            sizeof(capture) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_HOST_CAPTURE);
+    CHECK(strcmp(command.payload, "STATUS=SAVED") == 0);
+    const char clip_saving[] =
+        "HOST CAPTURE TYPE=CLIP STATUS=SAVING";
+    CHECK(
+        r4_protocol_parse(
+            clip_saving,
+            sizeof(clip_saving) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_HOST_CAPTURE);
+    CHECK(
+        strcmp(
+            command.payload,
+            "TYPE=CLIP STATUS=SAVING"
+        ) == 0
+    );
+    const char clip_unavailable[] =
+        "HOST CAPTURE TYPE=CLIP STATUS=UNAVAILABLE";
+    CHECK(
+        r4_protocol_parse(
+            clip_unavailable,
+            sizeof(clip_unavailable) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    const char invalid_capture[] = "HOST CAPTURE STATUS=DONE";
+    CHECK(
+        r4_protocol_parse(
+            invalid_capture,
+            sizeof(invalid_capture) - 1U,
+            &command
+        ) == R4_PARSE_INVALID_VALUE
+    );
+    const char invalid_clip[] =
+        "HOST CAPTURE TYPE=CLIP STATUS=BUSY";
+    CHECK(
+        r4_protocol_parse(
+            invalid_clip,
+            sizeof(invalid_clip) - 1U,
+            &command
+        ) == R4_PARSE_INVALID_VALUE
+    );
+
+    const char card[] = "HOST CARD STATE=READY";
+    CHECK(
+        r4_protocol_parse(
+            card,
+            sizeof(card) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+    CHECK(command.type == R4_COMMAND_HOST_CARD);
+    CHECK(strcmp(command.payload, "STATE=READY") == 0);
+    const char invalid_card[] = "HOST CARD STATE=ABSENT";
+    CHECK(
+        r4_protocol_parse(
+            invalid_card,
+            sizeof(invalid_card) - 1U,
+            &command
+        ) == R4_PARSE_INVALID_VALUE
+    );
+
+    CHECK(
+        r4_protocol_parse(
+            host,
+            sizeof(host) - 1U,
+            &command
+        ) == R4_PARSE_OK
+    );
+
     char field[32];
     CHECK(
         r4_protocol_find_field(
@@ -333,7 +413,7 @@ static void test_protocol_formatting(void) {
         r4_protocol_format_status(
             output,
             sizeof(output),
-            "0.8.0",
+            "0.10.0",
             1,
             2,
             3,
@@ -345,7 +425,7 @@ static void test_protocol_formatting(void) {
         )
     );
     CHECK(
-        strstr(output, "FW=0.8.0 LED=1,2,3") == output
+        strstr(output, "FW=0.10.0 LED=1,2,3") == output
     );
 }
 
@@ -640,6 +720,12 @@ static void test_display_snapshots(void) {
     CHECK(game_hash != 0);
     CHECK(game_hash != boot_hash);
 
+    model.replay_buffering = true;
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t replay_hash = r4_display_hash(&framebuffer);
+    CHECK(replay_hash != game_hash);
+    model.replay_buffering = false;
+
     r4_display_tick(&model, 499U);
     CHECK(model.clock_colon_visible);
     CHECK(r4_display_render(&model, &framebuffer));
@@ -676,11 +762,42 @@ static void test_display_snapshots(void) {
     CHECK(!model.game_timer_running);
     CHECK(model.game_elapsed_seconds == 0U);
 
+    r4_display_show_notification(
+        &model,
+        "CAPTURE SAVED",
+        UINT32_MAX - 500U
+    );
+    CHECK(model.notification_visible);
+    CHECK(r4_display_render(&model, &framebuffer));
+    const uint32_t notification_hash =
+        r4_display_hash(&framebuffer);
+    CHECK(notification_hash != game_hash);
+    r4_display_tick(
+        &model,
+        R4_DISPLAY_NOTIFICATION_DURATION_MS - 502U
+    );
+    CHECK(model.notification_visible);
+    r4_display_tick(
+        &model,
+        R4_DISPLAY_NOTIFICATION_DURATION_MS - 501U
+    );
+    CHECK(!model.notification_visible);
+
     strcpy(model.achievement, "FIRST WIN");
+    r4_display_show_notification(&model, "CARD READY", 1000U);
     r4_display_show_achievement(&model, 1000);
     CHECK(model.achievement_visible);
+    CHECK(model.notification_visible);
     CHECK(r4_display_render(&model, &framebuffer));
     CHECK(r4_display_hash(&framebuffer) != game_hash);
+    const uint32_t achievement_over_notification_hash =
+        r4_display_hash(&framebuffer);
+    model.notification_visible = false;
+    CHECK(r4_display_render(&model, &framebuffer));
+    CHECK(
+        r4_display_hash(&framebuffer) ==
+            achievement_over_notification_hash
+    );
     r4_display_tick(
         &model,
         1000 + R4_DISPLAY_ACHIEVEMENT_DURATION_MS - 1U

@@ -14,8 +14,11 @@ GAME_START_DIR="/userdata/system/configs/emulationstation/scripts/game-start"
 GAME_SELECTED_DIR="/userdata/system/configs/emulationstation/scripts/game-selected"
 
 SERVICE_NAME="R4Controller"
+GAME_CARD_SERVICE_NAME="R4GameCard"
 VERSION_CONFIG_NAME="firmware-version.conf"
 OLED_TCP_CONFIG_NAME="oled-tcp.conf"
+GAME_CARD_CONFIG_NAME="game-card.conf"
+REPLAY_CONFIG_NAME="replay.conf"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -69,7 +72,16 @@ require_source_file \
     "$SOURCE_DIR/bin/r4-oled-tcp"
 
 require_source_file \
+    "$SOURCE_DIR/bin/r4-game-card"
+
+require_source_file \
+    "$SOURCE_DIR/bin/r4-replay"
+
+require_source_file \
     "$SOURCE_DIR/services/R4Controller"
+
+require_source_file \
+    "$SOURCE_DIR/services/R4GameCard"
 
 require_source_file \
     "$SOURCE_DIR/scripts/R4GameState"
@@ -82,6 +94,20 @@ require_source_file \
 
 require_source_file \
     "$SOURCE_DIR/$OLED_TCP_CONFIG_NAME"
+
+require_source_file \
+    "$SOURCE_DIR/$GAME_CARD_CONFIG_NAME"
+
+require_source_file \
+    "$SOURCE_DIR/$REPLAY_CONFIG_NAME"
+
+if [ -x "$R4_DIR/r4-replay" ]; then
+    "$R4_DIR/r4-replay" stop >/dev/null 2>&1 || true
+fi
+
+batocera-services stop "$GAME_CARD_SERVICE_NAME" \
+    >/dev/null 2>&1 ||
+    true
 
 batocera-services stop "$SERVICE_NAME" \
     >/dev/null 2>&1 ||
@@ -126,6 +152,16 @@ cp \
     fail "Unable to install r4-oled-tcp"
 
 cp \
+    "$SOURCE_DIR/bin/r4-game-card" \
+    "$R4_DIR/r4-game-card" ||
+    fail "Unable to install r4-game-card"
+
+cp \
+    "$SOURCE_DIR/bin/r4-replay" \
+    "$R4_DIR/r4-replay" ||
+    fail "Unable to install r4-replay"
+
+cp \
     "$VERSION_CONFIG_SOURCE" \
     "$R4_DIR/$VERSION_CONFIG_NAME" ||
     fail "Unable to install $VERSION_CONFIG_NAME"
@@ -137,10 +173,29 @@ if [ ! -f "$R4_DIR/$OLED_TCP_CONFIG_NAME" ]; then
         fail "Unable to install $OLED_TCP_CONFIG_NAME"
 fi
 
+if [ ! -f "$R4_DIR/$GAME_CARD_CONFIG_NAME" ]; then
+    cp \
+        "$SOURCE_DIR/$GAME_CARD_CONFIG_NAME" \
+        "$R4_DIR/$GAME_CARD_CONFIG_NAME" ||
+        fail "Unable to install $GAME_CARD_CONFIG_NAME"
+fi
+
+if [ ! -f "$R4_DIR/$REPLAY_CONFIG_NAME" ]; then
+    cp \
+        "$SOURCE_DIR/$REPLAY_CONFIG_NAME" \
+        "$R4_DIR/$REPLAY_CONFIG_NAME" ||
+        fail "Unable to install $REPLAY_CONFIG_NAME"
+fi
+
 cp \
     "$SOURCE_DIR/services/R4Controller" \
     "$SERVICE_DIR/R4Controller" ||
     fail "Unable to install R4Controller service"
+
+cp \
+    "$SOURCE_DIR/services/R4GameCard" \
+    "$SERVICE_DIR/R4GameCard" ||
+    fail "Unable to install R4GameCard service"
 
 cp \
     "$SOURCE_DIR/scripts/R4GameState" \
@@ -166,17 +221,29 @@ chmod +x "$R4_DIR/r4-ecctl"
 chmod +x "$R4_DIR/r4-led-state"
 chmod +x "$R4_DIR/r4-game-title"
 chmod +x "$R4_DIR/r4-oled-tcp"
+chmod +x "$R4_DIR/r4-game-card"
+chmod +x "$R4_DIR/r4-replay"
 chmod +x "$SERVICE_DIR/R4Controller"
+chmod +x "$SERVICE_DIR/R4GameCard"
 chmod +x "$SCRIPT_DIR/R4GameState"
 chmod +x "$ACHIEVEMENT_DIR/R4Achievement"
 chmod +x "$GAME_START_DIR/R4GameMetadata"
 chmod +x "$GAME_SELECTED_DIR/R4GameMetadata"
 
+"$R4_DIR/r4-replay" cleanup ||
+    fail "Unable to clean stale replay buffer"
+
 batocera-services enable "$SERVICE_NAME" ||
     fail "Unable to enable $SERVICE_NAME"
 
+batocera-services enable "$GAME_CARD_SERVICE_NAME" ||
+    fail "Unable to enable $GAME_CARD_SERVICE_NAME"
+
 batocera-services start "$SERVICE_NAME" ||
     fail "Unable to start $SERVICE_NAME"
+
+batocera-services start "$GAME_CARD_SERVICE_NAME" ||
+    fail "Unable to start $GAME_CARD_SERVICE_NAME"
 
 sleep 3
 
@@ -186,9 +253,14 @@ echo "  $R4_DIR/r4-ecctl"
 echo "  $R4_DIR/r4-led-state"
 echo "  $R4_DIR/r4-game-title"
 echo "  $R4_DIR/r4-oled-tcp"
+echo "  $R4_DIR/r4-game-card"
+echo "  $R4_DIR/r4-replay"
 echo "  $R4_DIR/$VERSION_CONFIG_NAME"
 echo "  $R4_DIR/$OLED_TCP_CONFIG_NAME"
+echo "  $R4_DIR/$GAME_CARD_CONFIG_NAME"
+echo "  $R4_DIR/$REPLAY_CONFIG_NAME"
 echo "  $SERVICE_DIR/R4Controller"
+echo "  $SERVICE_DIR/R4GameCard"
 echo "  $SCRIPT_DIR/R4GameState"
 echo "  $ACHIEVEMENT_DIR/R4Achievement"
 echo "  $GAME_START_DIR/R4GameMetadata"
@@ -220,6 +292,10 @@ fi
 echo
 
 "$SERVICE_DIR/R4Controller" status ||
+    true
+
+echo
+"$SERVICE_DIR/R4GameCard" status ||
     true
 
 echo

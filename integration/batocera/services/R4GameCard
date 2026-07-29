@@ -1,0 +1,74 @@
+#!/bin/sh
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp/r4-game-card}"
+MANAGER="${R4_GAME_CARD_MANAGER:-$R4_DATA_DIR/r4-game-card}"
+PID_FILE="$R4_RUNTIME_DIR/service.pid"
+
+is_running() {
+    [ -f "$PID_FILE" ] || return 1
+    service_pid="$(cat "$PID_FILE" 2>/dev/null)"
+    [ -n "$service_pid" ] &&
+        kill -0 "$service_pid" 2>/dev/null
+}
+
+start_service() {
+    if is_running; then
+        echo "R4 Game Card service is already running"
+        return 0
+    fi
+
+    [ -x "$MANAGER" ] || {
+        echo "R4 Game Card manager is missing: $MANAGER" >&2
+        return 1
+    }
+
+    mkdir -p "$R4_RUNTIME_DIR" || return 1
+    "$MANAGER" run >/dev/null 2>&1 &
+    service_pid=$!
+    printf '%s\n' "$service_pid" > "$PID_FILE"
+
+    sleep 1
+    if kill -0 "$service_pid" 2>/dev/null; then
+        echo "R4 Game Card service started"
+        return 0
+    fi
+
+    rm -f "$PID_FILE"
+    echo "Unable to start R4 Game Card service" >&2
+    return 1
+}
+
+stop_service() {
+    if is_running; then
+        service_pid="$(cat "$PID_FILE")"
+        kill "$service_pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    echo "R4 Game Card service stopped"
+}
+
+case "${1:-}" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart)
+        stop_service
+        sleep 1
+        start_service
+        ;;
+    status)
+        if is_running; then
+            echo "Service: running (PID $(cat "$PID_FILE"))"
+        else
+            echo "Service: stopped"
+        fi
+        "$MANAGER" status
+        ;;
+    run)
+        exec "$MANAGER" run
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|run}" >&2
+        exit 1
+        ;;
+esac

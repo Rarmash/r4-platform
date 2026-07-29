@@ -340,6 +340,7 @@ static void process_host_game(const char *payload) {
     }
 
     if (strcmp(action, "START") == 0) {
+        display_model.replay_buffering = false;
         copy_decoded_field(
             payload,
             "SYSTEM_HEX",
@@ -359,6 +360,7 @@ static void process_host_game(const char *payload) {
         );
     } else if (strcmp(action, "STOP") == 0) {
         display_model.screen = R4_DISPLAY_HOME;
+        display_model.replay_buffering = false;
         display_model.system[0] = '\0';
         display_model.game[0] = '\0';
         r4_display_stop_game(&display_model);
@@ -407,6 +409,124 @@ static void process_host_achievement(const char *payload) {
         to_ms_since_boot(get_absolute_time())
     );
     cdc_write_line("OK HOST ACHIEVEMENT");
+}
+
+static void process_host_capture(const char *payload) {
+    char status[16];
+    char type[16] = "SCREENSHOT";
+    const char *notification;
+
+    if (
+        r4_protocol_find_field(
+            payload,
+            "TYPE",
+            type,
+            sizeof(type)
+        ) &&
+        strcmp(type, "SCREENSHOT") != 0 &&
+        strcmp(type, "CLIP") != 0
+    ) {
+        cdc_write_line("ERR HOST_CAPTURE_VALUE");
+        return;
+    }
+
+    if (
+        !r4_protocol_find_field(
+            payload,
+            "STATUS",
+            status,
+            sizeof(status)
+        )
+    ) {
+        cdc_write_line("ERR HOST_CAPTURE_USAGE");
+        return;
+    }
+
+    if (strcmp(type, "SCREENSHOT") == 0) {
+        if (strcmp(status, "BUSY") == 0) {
+            notification = "CAPTURING";
+        } else if (strcmp(status, "SAVED") == 0) {
+            notification = "CAPTURE SAVED";
+        } else if (strcmp(status, "ERROR") == 0) {
+            notification = "CAPTURE ERROR";
+        } else {
+            cdc_write_line("ERR HOST_CAPTURE_VALUE");
+            return;
+        }
+    } else {
+        if (strcmp(status, "BUFFERING") == 0) {
+            display_model.replay_buffering = true;
+            cdc_write_line("OK HOST CAPTURE");
+            return;
+        } else if (strcmp(status, "SAVING") == 0) {
+            notification = "CLIP SAVING";
+        } else if (strcmp(status, "SAVED") == 0) {
+            notification = "CLIP SAVED";
+        } else if (strcmp(status, "ERROR") == 0) {
+            display_model.replay_buffering = false;
+            notification = "CLIP ERROR";
+        } else if (strcmp(status, "UNAVAILABLE") == 0) {
+            display_model.replay_buffering = false;
+            notification = "CLIP UNAVAILABLE";
+        } else {
+            cdc_write_line("ERR HOST_CAPTURE_VALUE");
+            return;
+        }
+    }
+
+    r4_display_show_notification(
+        &display_model,
+        notification,
+        to_ms_since_boot(get_absolute_time())
+    );
+    cdc_write_line("OK HOST CAPTURE");
+}
+
+static void process_host_card(const char *payload) {
+    char state[16];
+    char notification[24];
+
+    if (
+        !r4_protocol_find_field(
+            payload,
+            "STATE",
+            state,
+            sizeof(state)
+        )
+    ) {
+        cdc_write_line("ERR HOST_CARD_USAGE");
+        return;
+    }
+
+    if (
+        strcmp(state, "INSERTED") != 0 &&
+        strcmp(state, "READY") != 0 &&
+        strcmp(state, "BUSY") != 0 &&
+        strcmp(state, "EJECTED") != 0 &&
+        strcmp(state, "ERROR") != 0
+    ) {
+        cdc_write_line("ERR HOST_CARD_VALUE");
+        return;
+    }
+
+    snprintf(
+        display_model.card_state,
+        sizeof(display_model.card_state),
+        "%s",
+        state
+    );
+    snprintf(
+        notification,
+        sizeof(notification),
+        "CARD %s",
+        state
+    );
+    r4_display_show_notification(
+        &display_model,
+        notification,
+        to_ms_since_boot(get_absolute_time())
+    );
+    cdc_write_line("OK HOST CARD");
 }
 
 static void process_host_telemetry(const char *payload) {
@@ -1028,6 +1148,22 @@ static void process_parsed_command(
             process_host_achievement(command->payload);
             break;
 
+        case R4_COMMAND_HOST_CAPTURE:
+            r4_display_host_activity(
+                &display_model,
+                to_ms_since_boot(get_absolute_time())
+            );
+            process_host_capture(command->payload);
+            break;
+
+        case R4_COMMAND_HOST_CARD:
+            r4_display_host_activity(
+                &display_model,
+                to_ms_since_boot(get_absolute_time())
+            );
+            process_host_card(command->payload);
+            break;
+
         case R4_COMMAND_HOST_TELEMETRY:
             r4_display_host_activity(
                 &display_model,
@@ -1051,7 +1187,8 @@ static void process_parsed_command(
                 "LED FLASH <R> <G> <B> <MS> "
                 "LED OFF EVENT NEXT FRAMEBUFFER INFO "
                 "FRAMEBUFFER CHUNK ... HOST HEARTBEAT "
-                "HOST ... HELP"
+                "HOST CAPTURE TYPE=... STATUS=... "
+                "HOST CARD STATE=... HELP"
             );
             break;
 
@@ -1073,6 +1210,14 @@ static void process_cdc_command(void) {
 
     if (status == R4_PARSE_OK) {
         process_parsed_command(&command);
+    } else if (
+        strncmp(cdc_command_buffer, "HOST CAPTURE", 12) == 0
+    ) {
+        cdc_write_line("ERR HOST_CAPTURE_USAGE");
+    } else if (
+        strncmp(cdc_command_buffer, "HOST CARD", 9) == 0
+    ) {
+        cdc_write_line("ERR HOST_CARD_USAGE");
     } else if (
         strncmp(cdc_command_buffer, "LED FLASH", 9) == 0
     ) {

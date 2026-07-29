@@ -18,10 +18,15 @@ for script in \
     "$INTEGRATION_DIR/bin/r4-ecctl" \
     "$INTEGRATION_DIR/bin/r4-led-state" \
     "$INTEGRATION_DIR/bin/r4-oled-tcp" \
+    "$INTEGRATION_DIR/bin/r4-game-card" \
+    "$INTEGRATION_DIR/bin/r4-replay" \
     "$INTEGRATION_DIR/services/R4Controller" \
+    "$INTEGRATION_DIR/services/R4GameCard" \
     "$INTEGRATION_DIR/scripts/R4GameState" \
     "$INTEGRATION_DIR/emulationstation/game-start/R4GameMetadata" \
     "$INTEGRATION_DIR/emulationstation/achievements/R4Achievement" \
+    "$TEST_DIR/test-game-card.sh" \
+    "$TEST_DIR/test-replay.sh" \
     "$0"
 do
     sh -n "$script"
@@ -29,6 +34,55 @@ done
 
 service="$INTEGRATION_DIR/services/R4Controller"
 log_file="$TEMP_DIR/controller.log"
+capture_ecctl="$TEMP_DIR/capture-ecctl"
+capture_commands="$TEMP_DIR/capture-commands.log"
+capture_action_log="$TEMP_DIR/capture-actions.log"
+capture_success="$TEMP_DIR/batocera-screenshot-success"
+capture_failure="$TEMP_DIR/batocera-screenshot-failure"
+capture_replay="$TEMP_DIR/capture-replay"
+capture_replay_commands="$TEMP_DIR/capture-replay-commands.log"
+
+cat > "$capture_ecctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$R4_CAPTURE_COMMANDS"
+echo OK
+EOF
+
+cat > "$capture_success" <<'EOF'
+#!/bin/sh
+echo screenshot >> "$R4_CAPTURE_ACTIONS"
+exit 0
+EOF
+
+cat > "$capture_failure" <<'EOF'
+#!/bin/sh
+echo screenshot >> "$R4_CAPTURE_ACTIONS"
+exit 1
+EOF
+
+cat > "$capture_replay" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$R4_CAPTURE_REPLAY_COMMANDS"
+case "$1" in
+    save)
+        if [ "${R4_CAPTURE_REPLAY_UNAVAILABLE:-0}" = "1" ]; then
+            echo UNAVAILABLE
+            exit 3
+        fi
+        echo ACCEPTED
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+
+chmod +x \
+    "$capture_ecctl" \
+    "$capture_success" \
+    "$capture_failure" \
+    "$capture_replay"
+: > "$capture_commands"
+: > "$capture_action_log"
+: > "$capture_replay_commands"
 
 if R4_DATA_DIR="$TEMP_DIR/data" \
    R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
@@ -41,12 +95,93 @@ fi
 R4_DATA_DIR="$TEMP_DIR/data" \
 R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
 R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_BATOCERA_SCREENSHOT="$capture_success" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_ACTIONS="$capture_action_log" \
 R4_ENABLE_TEST_EVENTS=1 \
     "$service" test-event CAPTURE SHORT
 
-grep -q \
-    'Capture short event seq=TEST: screenshot action is not wired yet' \
+[ "$(wc -l < "$capture_action_log")" -eq 1 ]
+grep -q '^HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY$' "$capture_commands"
+grep -q '^HOST CAPTURE TYPE=SCREENSHOT STATUS=SAVED$' "$capture_commands"
+grep -q '^LED FLASH 0 32 0 500$' "$capture_commands"
+grep -q 'Capture short event seq=TEST result=SAVED detail=saved' \
     "$log_file"
+
+: > "$capture_commands"
+: > "$capture_action_log"
+R4_DATA_DIR="$TEMP_DIR/data" \
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_BATOCERA_SCREENSHOT="$capture_failure" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_ACTIONS="$capture_action_log" \
+R4_ENABLE_TEST_EVENTS=1 \
+    "$service" test-event CAPTURE SHORT
+
+[ "$(wc -l < "$capture_action_log")" -eq 1 ]
+grep -q '^HOST CAPTURE TYPE=SCREENSHOT STATUS=ERROR$' "$capture_commands"
+grep -q '^LED FLASH 32 0 0 700$' "$capture_commands"
+grep -q 'Capture short event seq=TEST result=ERROR detail=command-failed' \
+    "$log_file"
+
+: > "$capture_commands"
+: > "$capture_action_log"
+R4_DATA_DIR="$TEMP_DIR/data" \
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_BATOCERA_SCREENSHOT="$TEMP_DIR/missing-batocera-screenshot" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_ACTIONS="$capture_action_log" \
+R4_ENABLE_TEST_EVENTS=1 \
+    "$service" test-event CAPTURE SHORT
+
+[ ! -s "$capture_action_log" ]
+grep -q '^HOST CAPTURE TYPE=SCREENSHOT STATUS=ERROR$' "$capture_commands"
+grep -q 'Capture short event seq=TEST result=ERROR detail=command-missing' \
+    "$log_file"
+
+: > "$capture_commands"
+: > "$capture_action_log"
+R4_DATA_DIR="$TEMP_DIR/data" \
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_REPLAY_MANAGER="$capture_replay" \
+R4_BATOCERA_SCREENSHOT="$capture_success" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_ACTIONS="$capture_action_log" \
+R4_CAPTURE_REPLAY_COMMANDS="$capture_replay_commands" \
+R4_ENABLE_TEST_EVENTS=1 \
+    "$service" test-event CAPTURE LONG
+
+[ ! -s "$capture_action_log" ]
+if grep -q 'TYPE=SCREENSHOT' "$capture_commands"; then
+    echo "CAPTURE:LONG sent screenshot feedback" >&2
+    exit 1
+fi
+[ "$(grep -c '^save TEST$' "$capture_replay_commands")" -eq 1 ]
+grep -q '^HOST CAPTURE TYPE=CLIP STATUS=SAVING$' "$capture_commands"
+grep -q '^LED FLASH 24 12 0 700$' "$capture_commands"
+grep -q 'Capture long event seq=TEST result=ACCEPTED' "$log_file"
+
+: > "$capture_commands"
+R4_DATA_DIR="$TEMP_DIR/data" \
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_LOG_FILE="$log_file" \
+R4_ECCTL="$capture_ecctl" \
+R4_REPLAY_MANAGER="$capture_replay" \
+R4_CAPTURE_COMMANDS="$capture_commands" \
+R4_CAPTURE_REPLAY_COMMANDS="$capture_replay_commands" \
+R4_CAPTURE_REPLAY_UNAVAILABLE=1 \
+R4_ENABLE_TEST_EVENTS=1 \
+    "$service" test-event CAPTURE LONG
+
+grep -q '^HOST CAPTURE TYPE=CLIP STATUS=UNAVAILABLE$' "$capture_commands"
+grep -q '^LED FLASH 32 0 0 900$' "$capture_commands"
 
 R4_DATA_DIR="$TEMP_DIR/data" \
 R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
@@ -76,9 +211,14 @@ printf '%s\n' \
     'R4_OLED_TCP_BIND=127.0.0.1' \
     'R4_OLED_TCP_PORT=4274' \
     > "$TEMP_DIR/data/oled-tcp.conf"
+printf '%s\n' READY > "$TEMP_DIR/game-card-state"
 
 mock_ecctl="$TEMP_DIR/mock-ecctl"
 mock_commands="$TEMP_DIR/mock-commands.log"
+mock_game_card="$TEMP_DIR/mock-game-card"
+mock_game_card_commands="$TEMP_DIR/mock-game-card-commands.log"
+mock_replay="$TEMP_DIR/mock-replay"
+mock_replay_commands="$TEMP_DIR/mock-replay-commands.log"
 
 cat > "$mock_ecctl" <<'EOF'
 #!/bin/sh
@@ -90,7 +230,7 @@ case "$*" in
         echo PONG
         ;;
     VERSION)
-        echo "R4_CONTROLLER_FW 0.8.0"
+        echo "R4_CONTROLLER_FW 0.10.0"
         ;;
     "HOST HEARTBEAT")
         echo "OK HOST HEARTBEAT"
@@ -113,6 +253,22 @@ esac
 EOF
 
 chmod +x "$mock_ecctl"
+
+cat > "$mock_game_card" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$R4_MOCK_GAME_CARD_COMMANDS"
+EOF
+
+chmod +x "$mock_game_card"
+: > "$mock_game_card_commands"
+
+cat > "$mock_replay" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$R4_MOCK_REPLAY_COMMANDS"
+EOF
+
+chmod +x "$mock_replay"
+: > "$mock_replay_commands"
 
 title_lookup="$INTEGRATION_DIR/bin/r4-game-title"
 fixture_dir="$TEST_DIR/fixtures"
@@ -155,8 +311,12 @@ R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
 R4_TITLE_LOOKUP="$title_lookup" \
 R4_ECCTL="$mock_ecctl" \
 R4_LED_STATE=/bin/true \
+R4_GAME_CARD_MANAGER="$mock_game_card" \
+R4_REPLAY_MANAGER="$mock_replay" \
 R4_LOG_FILE="$TEMP_DIR/game-events.log" \
 R4_MOCK_COMMANDS="$mock_commands" \
+R4_MOCK_GAME_CARD_COMMANDS="$mock_game_card_commands" \
+R4_MOCK_REPLAY_COMMANDS="$mock_replay_commands" \
     "$INTEGRATION_DIR/scripts/R4GameState" \
     gameStart \
     psx \
@@ -167,6 +327,8 @@ R4_MOCK_COMMANDS="$mock_commands" \
 grep -q \
     '^HOST GAME ACTION=START SYSTEM_HEX=707378 GAME_HEX=5175616b65204949$' \
     "$mock_commands"
+grep -Fq "busy $quake_rom" "$mock_game_card_commands"
+grep -Fq "start psx $quake_rom Quake II" "$mock_replay_commands"
 
 R4_ES_EVENT=game-selected \
 R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
@@ -195,8 +357,12 @@ R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
 R4_TITLE_LOOKUP="$title_lookup" \
 R4_ECCTL="$mock_ecctl" \
 R4_LED_STATE=/bin/true \
+R4_GAME_CARD_MANAGER="$mock_game_card" \
+R4_REPLAY_MANAGER="$mock_replay" \
 R4_LOG_FILE="$TEMP_DIR/game-events.log" \
 R4_MOCK_COMMANDS="$mock_commands" \
+R4_MOCK_GAME_CARD_COMMANDS="$mock_game_card_commands" \
+R4_MOCK_REPLAY_COMMANDS="$mock_replay_commands" \
     "$INTEGRATION_DIR/scripts/R4GameState" \
     gameStart \
     gba \
@@ -216,12 +382,32 @@ if grep -q 'SYSTEM_HEX=2f7573657264617461' "$mock_commands"; then
     exit 1
 fi
 
+R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
+R4_ECCTL="$mock_ecctl" \
+R4_LED_STATE=/bin/true \
+R4_GAME_CARD_MANAGER="$mock_game_card" \
+R4_REPLAY_MANAGER="$mock_replay" \
+R4_LOG_FILE="$TEMP_DIR/game-events.log" \
+R4_MOCK_COMMANDS="$mock_commands" \
+R4_MOCK_GAME_CARD_COMMANDS="$mock_game_card_commands" \
+R4_MOCK_REPLAY_COMMANDS="$mock_replay_commands" \
+    "$INTEGRATION_DIR/scripts/R4GameState" \
+    gameStop \
+    gba \
+    libretro \
+    mgba \
+    "$mario_rom"
+
+grep -q '^idle$' "$mock_game_card_commands"
+grep -q '^stop$' "$mock_replay_commands"
+
 R4_DATA_DIR="$TEMP_DIR/data" \
 R4_RUNTIME_DIR="$TEMP_DIR/runtime" \
 R4_LOG_FILE="$log_file" \
 R4_ECCTL="$mock_ecctl" \
 R4_LED_STATE=/bin/true \
 R4_MOCK_COMMANDS="$mock_commands" \
+R4_GAME_CARD_STATE_FILE="$TEMP_DIR/game-card-state" \
     "$service" run &
 
 watchdog_pid=$!
@@ -258,8 +444,12 @@ wait "$watchdog_pid" 2>/dev/null || true
 
 grep -q '^HOST HEARTBEAT$' "$mock_commands"
 grep -q '^HOST STATE MODE=HOME$' "$mock_commands"
+grep -q '^HOST CARD STATE=READY$' "$mock_commands"
 grep -Eq '^HOST TELEMETRY TIME_HEX=[0-9a-f]{10} VOLUME=NA$' \
     "$mock_commands"
 grep -q 'Invalid R4_OLED_TCP_ENABLED' "$log_file"
 
-echo "Batocera shell, broker, TCP framing, heartbeat and event mocks passed"
+"$TEST_DIR/test-game-card.sh"
+"$TEST_DIR/test-replay.sh"
+
+echo "Batocera shell, Capture, Replay, Game Card, broker, TCP framing, heartbeat and event mocks passed"

@@ -213,6 +213,11 @@ if [ "${R4_ECCTL_DIRECT:-0}" != "1" ]; then
     if [ "$broker_result" -ne 3 ]; then
         exit "$broker_result"
     fi
+
+    if [ "${R4_ECCTL_BROKER_ONLY:-0}" = "1" ]; then
+        echo "R4 controller broker is unavailable" >&2
+        exit 1
+    fi
 fi
 
 acquire_lock || exit 1

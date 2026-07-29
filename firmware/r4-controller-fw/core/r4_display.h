@@ -7,6 +7,7 @@
 
 #define R4_DISPLAY_TEXT_CAPACITY 48U
 #define R4_DISPLAY_ACHIEVEMENT_DURATION_MS 5000U
+#define R4_DISPLAY_NOTIFICATION_DURATION_MS 2500U
 #define R4_DISPLAY_HOST_WATCHDOG_TIMEOUT_MS 7000U
 
 typedef enum {
@@ -27,8 +28,11 @@ typedef struct {
     char error[R4_DISPLAY_TEXT_CAPACITY];
     char error_before_host_error[R4_DISPLAY_TEXT_CAPACITY];
     char achievement[R4_DISPLAY_TEXT_CAPACITY];
+    char notification[R4_DISPLAY_TEXT_CAPACITY];
+    char card_state[16];
     char firmware_version[R4_DISPLAY_TEXT_CAPACITY];
     uint32_t achievement_hide_at_ms;
+    uint32_t notification_hide_at_ms;
     uint32_t game_started_at_ms;
     uint32_t game_elapsed_seconds;
     uint32_t remaining_runtime_minutes;
@@ -44,12 +48,14 @@ typedef struct {
     bool network_connected;
     bool retroachievements_active;
     bool achievement_visible;
+    bool notification_visible;
     bool orange_pi_connected;
     bool game_timer_running;
     bool remaining_runtime_available;
     bool host_watchdog_armed;
     bool host_link_lost;
     bool clock_colon_visible;
+    bool replay_buffering;
 } r4_display_model_t;
 
 typedef struct {
@@ -63,6 +69,12 @@ void r4_display_model_init(r4_display_model_t *model);
 
 void r4_display_show_achievement(
     r4_display_model_t *model,
+    uint32_t now_ms
+);
+
+void r4_display_show_notification(
+    r4_display_model_t *model,
+    const char *text,
     uint32_t now_ms
 );
 

@@ -1,8 +1,9 @@
 # R4 Controller Firmware
 
-RP2040 firmware for the R4 handheld controller. Version `0.8.0` keeps the
-working `0.7.0` USB HID + CDC behavior and adds hardware-independent foundations
-for analog triggers, service buttons and a future monochrome OLED.
+RP2040 firmware for the R4 handheld controller. Development version
+`0.10.0` keeps the `0.8.0` USB HID behavior and extends bounded host
+feedback for screenshots, previous-game replay and the software-managed
+R4 Game Card.
 
 The [Batocera integration](../../integration/batocera/README.md) owns host-side
 discovery and lifecycle events. The [root README](../../README.md) describes the
@@ -101,7 +102,7 @@ those HID bytes. D-pad and button bit positions are unchanged.
 Z and Rz were selected because Linux/SDL controller stacks conventionally expose
 the two triggers as unipolar axes corresponding to `ABS_Z` and `ABS_RZ`.
 Batocera/RetroArch may regard the changed descriptor as a controller
-reconfiguration: after flashing `0.8.0`, remap LT and RT as analog axes and
+reconfiguration: after flashing `0.8.0` or later, remap LT and RT as analog axes and
 verify every existing button plus `R4 + Start`. Do not map LT/RT as digital
 buttons unless a core specifically requires it.
 
@@ -169,7 +170,7 @@ The stable commands still work:
 | Command | Response |
 |---|---|
 | `PING` | `PONG` |
-| `VERSION` | `R4_CONTROLLER_FW 0.8.0` |
+| `VERSION` | `R4_CONTROLLER_FW 0.10.0` |
 | `INPUT` | existing fields followed by `LT`, `RT`, `LT_STATUS`, `RT_STATUS` |
 | `STATUS` | existing firmware/LED/input fields followed by trigger fields |
 | `LED R G B` | `OK LED R G B` |
@@ -178,6 +179,10 @@ The stable commands still work:
 | `FRAMEBUFFER INFO` | freeze and describe a rendered OLED snapshot |
 | `FRAMEBUFFER CHUNK ID=n OFFSET=n LENGTH=n` | read one packed snapshot chunk |
 | `HOST HEARTBEAT` | `OK HOST HEARTBEAT` |
+| `HOST CAPTURE STATUS=BUSY\|SAVED\|ERROR` | `OK HOST CAPTURE` (legacy screenshot form) |
+| `HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY\|SAVED\|ERROR` | `OK HOST CAPTURE` |
+| `HOST CAPTURE TYPE=CLIP STATUS=BUFFERING\|SAVING\|SAVED\|ERROR\|UNAVAILABLE` | `OK HOST CAPTURE` |
+| `HOST CARD STATE=INSERTED\|READY\|BUSY\|EJECTED\|ERROR` | `OK HOST CARD` |
 | `HELP` | command summary |
 
 Example production input without trigger hardware:
@@ -195,14 +200,20 @@ HOST GAME ACTION=START SYSTEM_HEX=6e6573 GAME_HEX=6d6172696f2e7a6970
 HOST GAME ACTION=STOP
 HOST RA ACTIVE=1
 HOST ACHIEVEMENT ID=143820 TITLE_HEX=46495253542057494e
+HOST CAPTURE TYPE=SCREENSHOT STATUS=SAVED
+HOST CAPTURE TYPE=CLIP STATUS=BUFFERING
+HOST CAPTURE TYPE=CLIP STATUS=SAVING
+HOST CAPTURE TYPE=CLIP STATUS=SAVED
+HOST CARD STATE=READY
 HOST HEARTBEAT
 HOST TELEMETRY BATTERY=78 RUNTIME_MIN=155 VOLUME=65 POWER=BATTERY NETWORK=UP TEMP_MILLIC=42125 TIME_HEX=31323a3334
 ```
 
-Hex fields carry arbitrary text without spaces confusing tokenization. Unknown
-additional fields are ignored for forward compatibility; missing or invalid
-required fields return a command-specific `ERR ...`. Unknown commands return
-`ERR UNKNOWN_COMMAND`.
+Hex fields carry arbitrary text without spaces confusing tokenization. Most
+host messages ignore unknown additional fields for forward compatibility.
+`HOST CAPTURE` and `HOST CARD` deliberately accept only the exact documented
+forms and values. Missing or invalid required fields return a bounded
+command-specific `ERR ...`; unknown commands return `ERR UNKNOWN_COMMAND`.
 
 Framebuffer transfer is request/response only. `FRAMEBUFFER INFO` renders the
 current RP2040 display model into the firmware-owned 128x64 test profile, packs
@@ -234,12 +245,18 @@ without redefining existing ones; no adaptive-trigger mechanism is implemented.
 The 128x64 profile uses a readable 5x7 uppercase ASCII font. Its top status bar
 shows time, external/battery power, charge percentage and estimated runtime.
 Home identifies the device as `R4 BATOCERA` and shows firmware version,
-RetroAchievements and volume. The game footer replaces firmware version with a
-session timer; long game titles wrap onto a second line. Temperature remains
-available on the diagnostic screen. An achievement temporarily replaces the
-bottom area and is hidden by firmware after five seconds, after which the
-normal status row returns. Runtime is supplied by the host because percentage
-alone is insufficient for a reliable estimate.
+RetroAchievements, volume and the latest Game Card state. The game footer
+replaces firmware version with a session timer; long game titles wrap onto a
+second line. While Batocera reports an active replay ring, the game screen
+shows a small `RPL` marker. Temperature remains available on the diagnostic
+screen. Screenshot, clip and Game Card changes use a reusable 2.5-second
+notification over the bottom area. Clip states are `CLIP SAVING`,
+`CLIP SAVED`, `CLIP ERROR` and `CLIP UNAVAILABLE`; `BUFFERING` changes only
+the unobtrusive marker. An achievement keeps priority over that notification
+and is hidden by firmware after five seconds, after which the underlying screen
+returns.
+Runtime is supplied by the host because percentage alone is insufficient for a
+reliable estimate.
 
 `HOST HEARTBEAT` explicitly arms a seven-second firmware watchdog. Heartbeats
 and other valid `HOST ...` traffic refresh it. If the host becomes silent,
@@ -299,7 +316,7 @@ Use the normal Pico SDK build described above and flash:
 firmware/r4-controller-fw/build/r4-controller-fw.uf2
 ```
 
-The connected board must answer `R4_CONTROLLER_FW 0.8.0` and support
+The connected board must answer `R4_CONTROLLER_FW 0.10.0` and support
 `FRAMEBUFFER INFO`. This feature is available in the normal production build;
 `R4_ENABLE_TEST_INPUT` is not required.
 
@@ -379,7 +396,7 @@ not expose it outside a trusted test LAN. The installer preserves an existing
 Run the Python GUI on Windows:
 
 ```powershell
-$batoceraIp = '192.168.1.123'
+$batoceraIp = '192.168.1.154'
 py -3 ./firmware/r4-controller-fw/oled-emulator/r4_oled_gui.py `
   --tcp "${batoceraIp}:4274"
 ```
@@ -387,7 +404,7 @@ py -3 ./firmware/r4-controller-fw/oled-emulator/r4_oled_gui.py `
 Or run the packaged GUI:
 
 ```powershell
-$batoceraIp = '192.168.1.123'
+$batoceraIp = '192.168.1.154'
 ./r4-oled-emulator-gui.exe --tcp "${batoceraIp}:4274"
 ```
 

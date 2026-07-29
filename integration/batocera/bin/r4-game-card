@@ -1,0 +1,762 @@
+#!/bin/sh
+
+R4_DATA_DIR="${R4_DATA_DIR:-/userdata/system/r4}"
+R4_RUNTIME_DIR="${R4_RUNTIME_DIR:-/tmp/r4-game-card}"
+CONFIG_FILE="${R4_GAME_CARD_CONFIG:-$R4_DATA_DIR/game-card.conf}"
+ECCTL="${R4_ECCTL:-$R4_DATA_DIR/r4-ecctl}"
+BLKID="${R4_BLKID:-blkid}"
+MOUNT="${R4_MOUNT:-mount}"
+UMOUNT="${R4_UMOUNT:-umount}"
+SYNC="${R4_SYNC:-sync}"
+PROC_MOUNTS="${R4_PROC_MOUNTS:-/proc/mounts}"
+CANDIDATES_FILE="${R4_GAME_CARD_CANDIDATES_FILE:-}"
+LOG_FILE="${R4_GAME_CARD_LOG:-$R4_DATA_DIR/r4-game-card.log}"
+
+STATE_FILE="$R4_RUNTIME_DIR/state"
+DEVICE_FILE="$R4_RUNTIME_DIR/device"
+PRESENT_FILE="$R4_RUNTIME_DIR/present"
+EJECTED_FILE="$R4_RUNTIME_DIR/ejected"
+BUSY_DIR="$R4_RUNTIME_DIR/busy.d"
+LOCK_DIR="$R4_RUNTIME_DIR/lock"
+
+fail() {
+    echo "r4-game-card: $*" >&2
+    return 1
+}
+
+log_message() {
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" \
+        >> "$LOG_FILE" 2>/dev/null ||
+        true
+}
+
+validate_path() {
+    path_name="$1"
+    path_value="$2"
+    path_prefix="$3"
+
+    case "$path_value" in
+        ''|*[!A-Za-z0-9/._-]*|*/../*|*/..|*/./*|*/.|*//*)
+            fail "$path_name is not a safe absolute path"
+            return 1
+            ;;
+    esac
+
+    [ "${path_value#/}" != "$path_value" ] || {
+        fail "$path_name must be absolute"
+        return 1
+    }
+
+    if [ "${R4_GAME_CARD_ALLOW_UNSAFE_TEST_PATHS:-0}" != "1" ]; then
+        case "$path_value" in
+            "$path_prefix"/?*) ;;
+            *)
+                fail "$path_name must be below $path_prefix"
+                return 1
+                ;;
+        esac
+    fi
+}
+
+load_config() {
+    R4_GAME_CARD_ENABLED=""
+    R4_GAME_CARD_LABEL=""
+    R4_GAME_CARD_UUID=""
+    R4_GAME_CARD_PRIVATE_MOUNTPOINT=""
+    R4_GAME_CARD_ROMS_MOUNTPOINT=""
+    R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT=""
+    R4_GAME_CARD_VIDEOS_MOUNTPOINT=""
+    R4_GAME_CARD_POLL_INTERVAL=""
+    legacy_mountpoint=""
+
+    [ -f "$CONFIG_FILE" ] ||
+        fail "configuration is missing: $CONFIG_FILE" ||
+        return 1
+
+    while IFS= read -r config_line || [ -n "$config_line" ]; do
+        case "$config_line" in
+            R4_GAME_CARD_ENABLED=*)
+                R4_GAME_CARD_ENABLED="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_LABEL=*)
+                R4_GAME_CARD_LABEL="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_UUID=*)
+                R4_GAME_CARD_UUID="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_PRIVATE_MOUNTPOINT=*)
+                R4_GAME_CARD_PRIVATE_MOUNTPOINT="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_ROMS_MOUNTPOINT=*)
+                R4_GAME_CARD_ROMS_MOUNTPOINT="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT=*)
+                R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_VIDEOS_MOUNTPOINT=*)
+                R4_GAME_CARD_VIDEOS_MOUNTPOINT="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_MOUNTPOINT=*)
+                legacy_mountpoint="${config_line#*=}"
+                ;;
+            R4_GAME_CARD_POLL_INTERVAL=*)
+                R4_GAME_CARD_POLL_INTERVAL="${config_line#*=}"
+                ;;
+            ''|'#'*) ;;
+            *)
+                fail "invalid configuration entry: $config_line"
+                return 1
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+
+    : "${R4_GAME_CARD_PRIVATE_MOUNTPOINT:=${R4_GAME_CARD_DEFAULT_PRIVATE_MOUNTPOINT:-/userdata/system/r4/game-card}}"
+    if [ -z "$R4_GAME_CARD_ROMS_MOUNTPOINT" ]; then
+        if [ -n "$legacy_mountpoint" ]; then
+            R4_GAME_CARD_ROMS_MOUNTPOINT="$legacy_mountpoint"
+            log_message \
+                "legacy R4_GAME_CARD_MOUNTPOINT is used as the ROM view"
+        else
+            R4_GAME_CARD_ROMS_MOUNTPOINT="${R4_GAME_CARD_DEFAULT_ROMS_MOUNTPOINT:-/userdata/roms/r4-card}"
+        fi
+    fi
+    : "${R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT:=${R4_GAME_CARD_DEFAULT_SCREENSHOTS_MOUNTPOINT:-/userdata/screenshots/r4-card}}"
+    : "${R4_GAME_CARD_VIDEOS_MOUNTPOINT:=${R4_GAME_CARD_DEFAULT_VIDEOS_MOUNTPOINT:-/userdata/recordings/r4-card}}"
+
+    case "$R4_GAME_CARD_ENABLED" in
+        0|1) ;;
+        *)
+            fail "R4_GAME_CARD_ENABLED must be 0 or 1"
+            return 1
+            ;;
+    esac
+
+    if [ -n "$R4_GAME_CARD_UUID" ]; then
+        case "$R4_GAME_CARD_UUID" in
+            *[!A-Za-z0-9-]*)
+                fail "R4_GAME_CARD_UUID contains unsafe characters"
+                return 1
+                ;;
+        esac
+    else
+        case "$R4_GAME_CARD_LABEL" in
+            ''|*[!A-Za-z0-9._-]*)
+                fail "R4_GAME_CARD_LABEL must be a non-empty exact label"
+                return 1
+                ;;
+        esac
+    fi
+
+    case "$R4_GAME_CARD_POLL_INTERVAL" in
+        ''|*[!0-9]*)
+            fail "R4_GAME_CARD_POLL_INTERVAL must be an integer"
+            return 1
+            ;;
+    esac
+    if [ "$R4_GAME_CARD_POLL_INTERVAL" -lt 1 ] ||
+       [ "$R4_GAME_CARD_POLL_INTERVAL" -gt 60 ]; then
+        fail "R4_GAME_CARD_POLL_INTERVAL must be in 1..60"
+        return 1
+    fi
+
+    validate_path \
+        R4_GAME_CARD_PRIVATE_MOUNTPOINT \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" \
+        /userdata/system/r4 ||
+        return 1
+    validate_path \
+        R4_GAME_CARD_ROMS_MOUNTPOINT \
+        "$R4_GAME_CARD_ROMS_MOUNTPOINT" \
+        /userdata/roms ||
+        return 1
+    validate_path \
+        R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT \
+        "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" \
+        /userdata/screenshots ||
+        return 1
+    validate_path \
+        R4_GAME_CARD_VIDEOS_MOUNTPOINT \
+        "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" \
+        /userdata/recordings ||
+        return 1
+
+    if [ "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" = \
+            "$R4_GAME_CARD_ROMS_MOUNTPOINT" ] ||
+       [ "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" = \
+            "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" ] ||
+       [ "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" = \
+            "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" ] ||
+       [ "$R4_GAME_CARD_ROMS_MOUNTPOINT" = \
+            "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" ] ||
+       [ "$R4_GAME_CARD_ROMS_MOUNTPOINT" = \
+            "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" ] ||
+       [ "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" = \
+            "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" ]; then
+        fail "Game Card mountpoints must be distinct"
+        return 1
+    fi
+}
+
+acquire_lock() {
+    mkdir -p "$R4_RUNTIME_DIR" "$BUSY_DIR" || return 1
+    mkdir "$LOCK_DIR" 2>/dev/null ||
+        fail "another operation is in progress"
+}
+
+release_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+current_state() {
+    if [ -f "$STATE_FILE" ]; then
+        cat "$STATE_FILE"
+    else
+        echo EJECTED
+    fi
+}
+
+busy_count() {
+    count=0
+    for busy_file in "$BUSY_DIR"/*; do
+        [ -f "$busy_file" ] || continue
+        count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+busy_names() {
+    first=1
+    for busy_file in "$BUSY_DIR"/*; do
+        [ -f "$busy_file" ] || continue
+        busy_name="${busy_file##*/}"
+        if [ "$first" -eq 1 ]; then
+            printf '%s' "$busy_name"
+            first=0
+        else
+            printf ',%s' "$busy_name"
+        fi
+    done
+    [ "$first" -eq 1 ] || printf '\n'
+}
+
+validate_owner() {
+    case "$1" in
+        ''|*[!A-Za-z0-9._-]*)
+            fail "BUSY owner contains unsafe characters"
+            return 1
+            ;;
+    esac
+}
+
+notify_state() {
+    notify_value="$1"
+
+    [ "${R4_GAME_CARD_SUPPRESS_NOTIFY:-0}" != "1" ] || return 0
+
+    R4_ECCTL_BROKER_ONLY=1 \
+        "$ECCTL" HOST CARD "STATE=$notify_value" \
+        >/dev/null 2>&1 ||
+        true
+
+    case "$notify_value" in
+        INSERTED)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 32 16 0 500 >/dev/null 2>&1 ||
+                true
+            ;;
+        READY)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 0 32 0 500 >/dev/null 2>&1 ||
+                true
+            ;;
+        BUSY)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 0 0 32 500 >/dev/null 2>&1 ||
+                true
+            ;;
+        EJECTED)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 0 24 24 500 >/dev/null 2>&1 ||
+                true
+            ;;
+        ERROR)
+            R4_ECCTL_BROKER_ONLY=1 \
+                "$ECCTL" LED FLASH 32 0 0 700 >/dev/null 2>&1 ||
+                true
+            ;;
+    esac
+}
+
+set_state() {
+    new_state="$1"
+    state_detail="${2:-}"
+    old_state="$(current_state)"
+
+    printf '%s\n' "$new_state" > "$STATE_FILE" || return 1
+    if [ "$new_state" != "$old_state" ]; then
+        log_message \
+            "state=$new_state previous=$old_state detail=$state_detail"
+        notify_state "$new_state"
+    fi
+}
+
+list_devices() {
+    if [ -n "$CANDIDATES_FILE" ]; then
+        [ -f "$CANDIDATES_FILE" ] && cat "$CANDIDATES_FILE"
+    else
+        "$BLKID" -o device 2>/dev/null || true
+    fi
+}
+
+is_removable_partition() {
+    removable_device="$1"
+
+    if [ -n "$CANDIDATES_FILE" ]; then
+        return 0
+    fi
+
+    removable_name="${removable_device##*/}"
+    partition_path="/sys/class/block/$removable_name"
+    [ -f "$partition_path/partition" ] || return 1
+
+    parent_path="$(readlink -f "$partition_path/.." 2>/dev/null)" ||
+        return 1
+    parent_name="${parent_path##*/}"
+    [ "$(cat "/sys/class/block/$parent_name/removable" 2>/dev/null)" = "1" ]
+}
+
+device_value() {
+    "$BLKID" -s "$2" -o value "$1" 2>/dev/null || true
+}
+
+find_matching_device() {
+    match_count=0
+    matching_device=""
+
+    for candidate in $(list_devices); do
+        case "$candidate" in
+            /dev/*) ;;
+            *) continue ;;
+        esac
+        is_removable_partition "$candidate" || continue
+
+        if [ -n "$R4_GAME_CARD_UUID" ]; then
+            candidate_value="$(device_value "$candidate" UUID)"
+            expected_value="$R4_GAME_CARD_UUID"
+        else
+            candidate_value="$(device_value "$candidate" LABEL)"
+            expected_value="$R4_GAME_CARD_LABEL"
+        fi
+
+        if [ "$candidate_value" = "$expected_value" ]; then
+            match_count=$((match_count + 1))
+            matching_device="$candidate"
+        fi
+    done
+
+    [ "$match_count" -eq 1 ]
+}
+
+mount_record() {
+    [ -f "$PROC_MOUNTS" ] || return 0
+    awk -v point="$1" \
+        '$2 == point { print $1 "|" $4; exit }' \
+        "$PROC_MOUNTS"
+}
+
+options_have() {
+    case ",$1," in
+        *,"$2",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+directory_is_empty() {
+    [ -z "$(ls -A "$1" 2>/dev/null)" ]
+}
+
+ensure_target_directory() {
+    target_dir="$1"
+    mkdir -p "$target_dir" || return 1
+    directory_is_empty "$target_dir" || {
+        fail "mountpoint is not empty: $target_dir"
+        return 1
+    }
+}
+
+ensure_private_mount() {
+    private_record="$(mount_record "$R4_GAME_CARD_PRIVATE_MOUNTPOINT")"
+
+    if [ -n "$private_record" ]; then
+        private_device="${private_record%%|*}"
+        private_options="${private_record#*|}"
+        if [ "$private_device" != "$matching_device" ]; then
+            set_state ERROR occupied-private-mountpoint
+            return 1
+        fi
+        if ! options_have "$private_options" rw; then
+            set_state ERROR private-mount-not-writable
+            return 1
+        fi
+        return 0
+    fi
+
+    ensure_target_directory "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" || {
+        set_state ERROR private-mountpoint-not-empty
+        return 1
+    }
+
+    if "$MOUNT" -o rw,nosuid,nodev,noexec \
+        "$matching_device" \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT"; then
+        return 0
+    fi
+
+    set_state ERROR private-mount-failed
+    return 1
+}
+
+structure_ready() {
+    [ -d "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/ROMS" ] &&
+        [ -d "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Screenshots" ] &&
+        [ -d "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Videos" ]
+}
+
+publish_view() {
+    view_source="$1"
+    view_target="$2"
+    view_mode="$3"
+    view_record="$(mount_record "$view_target")"
+
+    if [ -n "$view_record" ]; then
+        view_options="${view_record#*|}"
+        if [ "$view_mode" = "ro" ]; then
+            options_have "$view_options" ro || return 1
+        else
+            options_have "$view_options" rw || return 1
+        fi
+        return 0
+    fi
+
+    ensure_target_directory "$view_target" || return 1
+    "$MOUNT" --bind "$view_source" "$view_target" || return 1
+
+    if [ "$view_mode" = "ro" ]; then
+        if ! "$MOUNT" -o remount,bind,ro "$view_target"; then
+            "$UMOUNT" "$view_target" >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
+}
+
+publish_views() {
+    publish_view \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/ROMS" \
+        "$R4_GAME_CARD_ROMS_MOUNTPOINT" \
+        ro || {
+        set_state ERROR rom-view-failed
+        return 1
+    }
+    publish_view \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Screenshots" \
+        "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" \
+        rw || {
+        set_state ERROR screenshot-view-failed
+        return 1
+    }
+    publish_view \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Videos" \
+        "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" \
+        rw || {
+        set_state ERROR video-view-failed
+        return 1
+    }
+}
+
+views_ready() {
+    rom_record="$(mount_record "$R4_GAME_CARD_ROMS_MOUNTPOINT")"
+    screenshot_record="$(
+        mount_record "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT"
+    )"
+    video_record="$(mount_record "$R4_GAME_CARD_VIDEOS_MOUNTPOINT")"
+
+    [ -n "$rom_record" ] &&
+        [ -n "$screenshot_record" ] &&
+        [ -n "$video_record" ] &&
+        options_have "${rom_record#*|}" ro &&
+        options_have "${screenshot_record#*|}" rw &&
+        options_have "${video_record#*|}" rw
+}
+
+unmount_one() {
+    unmount_target="$1"
+    [ -n "$(mount_record "$unmount_target")" ] || return 0
+    "$UMOUNT" "$unmount_target"
+}
+
+unpublish_views() {
+    unmount_one "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" || return 1
+    unmount_one "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" || return 1
+    unmount_one "$R4_GAME_CARD_ROMS_MOUNTPOINT" || return 1
+}
+
+refresh_ready_state() {
+    if [ "$(busy_count)" -gt 0 ]; then
+        set_state BUSY "owners=$(busy_names)"
+    else
+        set_state READY views-published
+    fi
+}
+
+scan_card() {
+    if [ "$R4_GAME_CARD_ENABLED" = "0" ]; then
+        set_state EJECTED disabled
+        return 0
+    fi
+
+    if ! find_matching_device; then
+        if [ "$match_count" -gt 1 ]; then
+            set_state ERROR multiple-matches
+            return 1
+        fi
+
+        if [ -f "$PRESENT_FILE" ]; then
+            if [ -f "$EJECTED_FILE" ]; then
+                rm -f "$PRESENT_FILE" "$EJECTED_FILE" "$DEVICE_FILE"
+                log_message "physical removal observed after safe eject"
+            else
+                set_state ERROR unsafe-removal
+                rm -f "$PRESENT_FILE" "$DEVICE_FILE"
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
+    if [ -f "$EJECTED_FILE" ] &&
+       [ "$(cat "$DEVICE_FILE" 2>/dev/null)" = "$matching_device" ]; then
+        set_state EJECTED waiting-for-removal
+        return 0
+    fi
+
+    printf '%s\n' "$matching_device" > "$DEVICE_FILE"
+    : > "$PRESENT_FILE"
+    set_state INSERTED detected
+
+    ensure_private_mount || return 1
+    if ! structure_ready; then
+        set_state INSERTED needs-init
+        return 0
+    fi
+
+    publish_views || return 1
+    refresh_ready_state
+}
+
+init_card() {
+    [ "$R4_GAME_CARD_ENABLED" = "1" ] ||
+        fail "Game Card support is disabled" ||
+        return 1
+
+    if ! find_matching_device; then
+        if [ "$match_count" -gt 1 ]; then
+            set_state ERROR multiple-matches
+        fi
+        fail "exactly one configured removable Game Card is required"
+        return 1
+    fi
+
+    printf '%s\n' "$matching_device" > "$DEVICE_FILE"
+    : > "$PRESENT_FILE"
+    rm -f "$EJECTED_FILE"
+    set_state INSERTED initializing
+    ensure_private_mount || return 1
+
+    mkdir -p \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/ROMS" \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Screenshots" \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT/CAPTURES/Videos" || {
+        set_state ERROR init-directory-failed
+        return 1
+    }
+
+    "$SYNC" "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" \
+        >/dev/null 2>&1 ||
+        "$SYNC" >/dev/null 2>&1 ||
+        true
+    publish_views || return 1
+    refresh_ready_state
+    log_message "card structure initialized device=$matching_device"
+}
+
+eject_card() {
+    if [ "$(busy_count)" -gt 0 ]; then
+        fail "card is BUSY: $(busy_names)"
+        return 1
+    fi
+
+    "$SYNC" "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" \
+        >/dev/null 2>&1 ||
+        "$SYNC" >/dev/null 2>&1 ||
+        true
+
+    if ! unpublish_views; then
+        set_state ERROR view-unmount-failed
+        return 1
+    fi
+
+    if ! unmount_one "$R4_GAME_CARD_PRIVATE_MOUNTPOINT"; then
+        set_state ERROR private-unmount-failed
+        return 1
+    fi
+
+    : > "$EJECTED_FILE"
+    set_state EJECTED safe-eject
+}
+
+add_busy_owner() {
+    busy_owner="$1"
+    validate_owner "$busy_owner" || return 1
+
+    case "$(current_state)" in
+        READY|BUSY) ;;
+        *)
+            fail "card must be READY or BUSY"
+            return 1
+            ;;
+    esac
+    views_ready || {
+        fail "Game Card views are unavailable"
+        return 1
+    }
+
+    : > "$BUSY_DIR/$busy_owner"
+    set_state BUSY "owners=$(busy_names)"
+}
+
+remove_busy_owner() {
+    busy_owner="$1"
+    validate_owner "$busy_owner" || return 1
+    rm -f "$BUSY_DIR/$busy_owner"
+
+    if [ "$(current_state)" = "BUSY" ] &&
+       [ "$(busy_count)" -eq 0 ]; then
+        set_state READY all-operations-finished
+    fi
+}
+
+mark_rom_busy() {
+    case "$1" in
+        "$R4_GAME_CARD_ROMS_MOUNTPOINT"/*)
+            add_busy_owner rom
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+mark_operation_error() {
+    error_owner="$1"
+    error_detail="$2"
+    validate_owner "$error_owner" || return 1
+    rm -f "$BUSY_DIR/$error_owner"
+    set_state ERROR "$error_detail"
+}
+
+capture_dir() {
+    views_ready || return 1
+    case "$1" in
+        screenshots)
+            printf '%s\n' "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT"
+            ;;
+        videos)
+            printf '%s\n' "$R4_GAME_CARD_VIDEOS_MOUNTPOINT"
+            ;;
+        *)
+            fail "capture type must be screenshots or videos"
+            return 1
+            ;;
+    esac
+}
+
+show_status() {
+    status_device="$(cat "$DEVICE_FILE" 2>/dev/null || true)"
+    status_busy="$(busy_names)"
+    printf 'STATE=%s DEVICE=%s PRIVATE=%s ROMS=%s SCREENSHOTS=%s VIDEOS=%s BUSY=%s\n' \
+        "$(current_state)" \
+        "${status_device:-NONE}" \
+        "$R4_GAME_CARD_PRIVATE_MOUNTPOINT" \
+        "$R4_GAME_CARD_ROMS_MOUNTPOINT" \
+        "$R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT" \
+        "$R4_GAME_CARD_VIDEOS_MOUNTPOINT" \
+        "${status_busy:-NONE}"
+}
+
+run_service() {
+    while true; do
+        "$0" scan >/dev/null 2>&1 || true
+        sleep "$R4_GAME_CARD_POLL_INTERVAL"
+    done
+}
+
+command_name="${1:-}"
+load_config || exit 1
+
+case "$command_name" in
+    run)
+        run_service
+        ;;
+    status)
+        show_status
+        ;;
+    busy-list)
+        busy_names
+        ;;
+    capture-dir)
+        [ "$#" -eq 2 ] ||
+            fail "usage: $0 capture-dir <screenshots|videos>" ||
+            exit 1
+        capture_dir "$2"
+        ;;
+    scan|init|eject|busy|idle|busy-add|busy-remove|operation-error)
+        acquire_lock || exit 1
+        trap 'release_lock' 0 1 2 15
+        case "$command_name" in
+            scan) scan_card ;;
+            init) init_card ;;
+            eject) eject_card ;;
+            busy)
+                [ "$#" -eq 2 ] ||
+                    fail "usage: $0 busy <rom-path>" ||
+                    exit 1
+                mark_rom_busy "$2"
+                ;;
+            idle) remove_busy_owner rom ;;
+            busy-add)
+                [ "$#" -eq 2 ] ||
+                    fail "usage: $0 busy-add <owner>" ||
+                    exit 1
+                add_busy_owner "$2"
+                ;;
+            busy-remove)
+                [ "$#" -eq 2 ] ||
+                    fail "usage: $0 busy-remove <owner>" ||
+                    exit 1
+                remove_busy_owner "$2"
+                ;;
+            operation-error)
+                [ "$#" -eq 3 ] ||
+                    fail "usage: $0 operation-error <owner> <detail>" ||
+                    exit 1
+                mark_operation_error "$2" "$3"
+                ;;
+        esac
+        ;;
+    *)
+        echo \
+            "Usage: $0 {scan|init|status|eject|busy <rom>|idle|busy-add <owner>|busy-remove <owner>|busy-list|capture-dir <screenshots|videos>|operation-error <owner> <detail>|run}" \
+            >&2
+        exit 1
+        ;;
+esac

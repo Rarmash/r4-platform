@@ -24,7 +24,11 @@ The current implementation supports:
 - Start and Select buttons;
 - R4 system button mapped as the Batocera/RetroArch Hotkey;
 - analog LT and RT axes in the `0.8.0` HID descriptor;
-- polling of queued R4 and future Capture/Trophy service events;
+- polling of queued R4, Capture and Trophy service events;
+- end-to-end Capture SHORT screenshots through `batocera-screenshot`;
+- a bounded segmented previous-game replay buffer for Capture LONG;
+- one-filesystem R4 Game Card management with read-only ROM and writable
+  capture views;
 - game, RetroAchievements and display-state forwarding to RP2040;
 - complete EmulationStation controller mapping;
 - standard `R4 + Start` emulator exit handling.
@@ -36,9 +40,16 @@ The current implementation supports:
 - `bin/r4-game-title` — resolves a ROM path to its `<name>` in
   EmulationStation `gamelist.xml`.
 - `bin/r4-oled-tcp` — optional framed diagnostic TCP relay for the OLED GUI.
+- `bin/r4-game-card` — validates, mounts and safely ejects the configured ROM
+  card without opening USB CDC directly.
+- `bin/r4-replay` — owns the bounded FFmpeg replay ring and capture routing.
 - `firmware-version.conf` — defines the expected RP2040 firmware version.
 - `oled-tcp.conf` — opt-in TCP bind address and port.
+- `game-card.conf` — preserved Game Card identity, mountpoint and polling
+  configuration.
+- `replay.conf` — preserved replay, encoding and capture-storage settings.
 - `services/R4Controller` — monitors the embedded controller and handles reconnection.
+- `services/R4GameCard` — polls the removable-card state machine.
 - `scripts/R4GameState` — changes the LED state when a game starts or stops.
 - `emulationstation/game-start/R4GameMetadata` — shared `game-selected` /
   `game-start` hook that caches and forwards the EmulationStation metadata
@@ -52,14 +63,19 @@ The current implementation supports:
 ```text
 integration/batocera/
 ├── firmware-version.conf
+├── game-card.conf
 ├── oled-tcp.conf
+├── replay.conf
 ├── bin/
 │   ├── r4-ecctl
 │   ├── r4-game-title
+│   ├── r4-game-card
 │   ├── r4-led-state
-│   └── r4-oled-tcp
+│   ├── r4-oled-tcp
+│   └── r4-replay
 ├── services/
-│   └── R4Controller
+│   ├── R4Controller
+│   └── R4GameCard
 ├── scripts/
 │   └── R4GameState
 ├── emulationstation/
@@ -82,10 +98,15 @@ integration/batocera/
 | `bin/r4-ecctl` | `/userdata/system/r4/r4-ecctl` |
 | `bin/r4-led-state` | `/userdata/system/r4/r4-led-state` |
 | `bin/r4-game-title` | `/userdata/system/r4/r4-game-title` |
+| `bin/r4-game-card` | `/userdata/system/r4/r4-game-card` |
 | `bin/r4-oled-tcp` | `/userdata/system/r4/r4-oled-tcp` |
+| `bin/r4-replay` | `/userdata/system/r4/r4-replay` |
 | `firmware-version.conf` | `/userdata/system/r4/firmware-version.conf` |
+| `game-card.conf` | `/userdata/system/r4/game-card.conf` |
 | `oled-tcp.conf` | `/userdata/system/r4/oled-tcp.conf` |
+| `replay.conf` | `/userdata/system/r4/replay.conf` |
 | `services/R4Controller` | `/userdata/system/services/R4Controller` |
+| `services/R4GameCard` | `/userdata/system/services/R4GameCard` |
 | `scripts/R4GameState` | `/userdata/system/scripts/R4GameState` |
 | `emulationstation/game-start/R4GameMetadata` | `/userdata/system/configs/emulationstation/scripts/game-start/R4GameMetadata` |
 | `emulationstation/game-start/R4GameMetadata` (same hook) | `/userdata/system/configs/emulationstation/scripts/game-selected/R4GameMetadata` |
@@ -93,11 +114,14 @@ integration/batocera/
 
 ## Installation
 
-Copy the complete integration directory to Batocera:
+Copy the complete integration directory to Batocera. In PowerShell, create a
+temporary archive first; do not pipe native `tar` bytes through the PowerShell
+object pipeline:
 
-```sh
-scp -r integration/batocera \
-    root@batocera:/userdata/system/r4-installer
+```powershell
+tar -C ./integration/batocera -czf ./r4-batocera-0.10.0.tar.gz .
+scp ./r4-batocera-0.10.0.tar.gz root@192.168.1.154:/tmp/
+ssh root@192.168.1.154 "rm -rf /userdata/system/r4-installer && mkdir -p /userdata/system/r4-installer && tar -C /userdata/system/r4-installer -xzf /tmp/r4-batocera-0.10.0.tar.gz"
 ```
 
 Run the installer:
@@ -112,14 +136,14 @@ The installer is idempotent and can also be used to update an existing installat
 
 It:
 
-- stops the currently installed service;
+- stops the currently installed services;
 - creates the required directories;
 - replaces the installed files;
 - restores executable permissions;
-- enables the controller service;
-- starts the controller service;
+- preserves existing `oled-tcp.conf`, `game-card.conf` and `replay.conf`;
+- enables and starts the controller and Game Card services;
 - checks the connected firmware version;
-- prints the resulting controller status.
+- prints the resulting controller and Game Card status.
 
 ## Manual executable permissions
 
@@ -129,8 +153,11 @@ All installed scripts must be executable:
 chmod +x /userdata/system/r4/r4-ecctl
 chmod +x /userdata/system/r4/r4-led-state
 chmod +x /userdata/system/r4/r4-game-title
+chmod +x /userdata/system/r4/r4-game-card
 chmod +x /userdata/system/r4/r4-oled-tcp
+chmod +x /userdata/system/r4/r4-replay
 chmod +x /userdata/system/services/R4Controller
+chmod +x /userdata/system/services/R4GameCard
 chmod +x /userdata/system/scripts/R4GameState
 chmod +x /userdata/system/configs/emulationstation/scripts/game-start/R4GameMetadata
 chmod +x /userdata/system/configs/emulationstation/scripts/game-selected/R4GameMetadata
@@ -215,7 +242,7 @@ starts the listener only when `R4_OLED_TCP_ENABLED=1`.
 On Windows:
 
 ```powershell
-$batoceraIp = '192.168.1.123'
+$batoceraIp = '192.168.1.154'
 ./r4-oled-emulator-gui.exe --tcp "${batoceraIp}:4274"
 ```
 
@@ -226,6 +253,166 @@ framebuffer request, the service opens CDC once and collects the existing
 bounded RP2040 chunks before returning one `FRAMEBUFFER FULL` TCP payload.
 Unchanged hashes return `FRAMEBUFFER UNCHANGED`. TCP framing remains one
 `REQ <id> ...` line followed by one matching `RES <id> OK|ERROR ...` line.
+
+## Capture and previous-game replay
+
+`R4Controller` consumes every queued Capture event exactly once. SHORT invokes
+Batocera's real `batocera-screenshot` command exactly once. LONG does not make a
+screenshot and does not start a future recording: it asks `r4-replay` to freeze
+and finalize the preceding buffered gameplay.
+
+While a supported game runs, `r4-replay` launches the FFmpeg available in
+Batocera 40:
+
+```text
+DRM/KMS framebuffer --kmsgrab--> libx264 video --+
+Pulse default monitor ---------> AAC audio ------+--> rotating MPEG-TS segments
+                                                         |
+Capture LONG --> snapshot complete segments --> concat stream copy --> MP4
+```
+
+The ring defaults to two-second segments in `/tmp/r4-replay`. On the checked
+Orange Pi 3 LTS, `/tmp` is a roughly 963 MiB tmpfs. Both duration and total
+buffer size are bounded; old segments are overwritten/trimmed, stale data is
+removed at startup, and only the finished MP4 is written to persistent storage.
+Finalization uses stream copy rather than a second full encode, validates video
+and audio streams with `ffprobe` when available, then atomically renames the
+file. A short game may produce a clip shorter than 30 seconds.
+
+The actual Batocera 40 audit found FFmpeg 4.4.4 with `kmsgrab`, Pulse input,
+segment muxing, `libx264`, AAC and MP4 support. KMS capture, Pulse-monitor
+audio, segmented encoding and a playable H.264/AAC MP4 finalization were
+smoke-tested on the Orange Pi. Its exposed V4L2 devices did not provide a
+working H.264 encoder to FFmpeg, so the current backend deliberately uses CPU
+`libx264`. RetroArch includes recording support but Batocera's launch path does
+not expose a persistent previous-game ring. No fictitious production backend
+is used.
+
+`/userdata/system/r4/replay.conf` controls the limits and routing:
+
+```sh
+R4_REPLAY_ENABLED=1
+R4_REPLAY_SECONDS=30
+R4_REPLAY_SEGMENT_SECONDS=2
+R4_REPLAY_BUFFER_DIR=/tmp/r4-replay
+R4_REPLAY_MAX_BUFFER_MB=128
+R4_REPLAY_FPS=30
+R4_REPLAY_MAX_WIDTH=1280
+R4_REPLAY_VIDEO_BITRATE=4000000
+R4_REPLAY_VIDEO_PRESET=ultrafast
+R4_REPLAY_AUDIO_ENABLED=1
+R4_REPLAY_DISABLED_SYSTEMS=dreamcast
+R4_CAPTURE_STORAGE=auto
+R4_CAPTURE_MIN_FREE_MB=256
+R4_CAPTURE_FALLBACK_INTERNAL=1
+R4_CAPTURE_INTERNAL_SCREENSHOTS=/userdata/screenshots
+R4_CAPTURE_INTERNAL_VIDEOS=/userdata/recordings
+```
+
+`R4_CAPTURE_MIN_FREE_MB` is only a refusal threshold, not a quota or reserved
+space. `auto` prefers a writable Game Card capture view and otherwise uses the
+internal paths when fallback is enabled. Dreamcast is disabled until real
+performance testing. A missing backend, disabled system or inactive ring
+returns `CLIP UNAVAILABLE`; concurrent saves return `BUSY` without starting a
+second finalizer.
+
+Firmware feedback distinguishes screenshots and clips:
+
+```text
+HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY|SAVED|ERROR
+HOST CAPTURE TYPE=CLIP STATUS=BUFFERING|SAVING|SAVED|ERROR|UNAVAILABLE
+```
+
+The OLED shows `RPL` while the ring is healthy, followed by bounded
+`CLIP SAVING`, `CLIP SAVED`, `CLIP ERROR` or `CLIP UNAVAILABLE` notifications.
+RGB uses amber while saving, green on success and red on failure, then restores
+the persistent game/menu color.
+
+Until Capture is electrically connected through the future GPIO expander, use
+the service test entry point:
+
+```sh
+R4_ENABLE_TEST_EVENTS=1 /userdata/system/services/R4Controller test-event CAPTURE SHORT
+R4_ENABLE_TEST_EVENTS=1 /userdata/system/services/R4Controller test-event CAPTURE LONG
+/userdata/system/r4/r4-replay status
+tail -n 50 /userdata/system/r4/r4-replay.log
+ls -lt /userdata/screenshots /userdata/recordings
+```
+
+This verifies the host path but does not claim that the physical Capture input
+or gameplay performance is hardware-verified.
+
+## R4 Game Card
+
+The Game Card is one removable physical partition with one ordinary filesystem.
+It is not Batocera's boot microSD and never stores BIOS, saves, settings or
+RetroAchievements data. No loop images, quotas, reserved capture space,
+automatic formatting or repartitioning are used.
+
+```text
+R4CARD/                          one shared filesystem/free-space pool
+├── ROMS/        --RO bind-->   /userdata/roms/r4-card
+└── CAPTURES/
+    ├── Screenshots/ --RW-->    /userdata/screenshots/r4-card
+    └── Videos/      --RW-->    /userdata/recordings/r4-card
+
+whole card RW private mount --> /userdata/system/r4/game-card
+```
+
+Batocera 40 was checked with a temporary filesystem: its util-linux `mount`
+supports bind mounts and `remount,bind,ro`; a write through the ROM view was
+rejected while a writable sibling view remained writable. The physical reader
+and final SD card still require verification.
+
+The preserved configuration is `/userdata/system/r4/game-card.conf`:
+
+```sh
+R4_GAME_CARD_ENABLED=1
+R4_GAME_CARD_LABEL=R4CARD
+R4_GAME_CARD_UUID=
+R4_GAME_CARD_PRIVATE_MOUNTPOINT=/userdata/system/r4/game-card
+R4_GAME_CARD_ROMS_MOUNTPOINT=/userdata/roms/r4-card
+R4_GAME_CARD_SCREENSHOTS_MOUNTPOINT=/userdata/screenshots/r4-card
+R4_GAME_CARD_VIDEOS_MOUNTPOINT=/userdata/recordings/r4-card
+R4_GAME_CARD_POLL_INTERVAL=1
+```
+
+UUID has priority; otherwise the exact label is required. Only removable
+partitions are considered and ambiguous, wrong-label and system devices are
+refused. The idempotent initialization command creates only the missing
+directories after selecting the exact configured card:
+
+```sh
+/userdata/system/r4/r4-game-card init
+```
+
+The public states remain `INSERTED`, `READY`, `BUSY`, `EJECTED` and `ERROR`.
+BUSY is represented by independent owners, currently `rom`,
+`capture-screenshot` and `capture-clip`; overlapping owners cannot clear each
+other. Safe eject refuses every active owner, calls `sync`, unmounts the three
+published views before the private mount, then latches `EJECTED` until physical
+removal/reinsertion. Unsafe physical removal becomes `ERROR`.
+
+```sh
+/userdata/system/r4/r4-game-card status
+/userdata/system/r4/r4-game-card busy-list
+/userdata/system/r4/r4-game-card scan
+/userdata/system/r4/r4-game-card eject
+```
+
+The legacy `R4_GAME_CARD_MOUNTPOINT=/userdata/roms/r4-card` remains accepted as
+the ROM view only; it is never reinterpreted as the private writable root.
+Installation preserves the user's existing config and never deletes or moves
+ROMs or capture files.
+
+State and capture feedback use the existing `r4-ecctl` broker, so
+`R4Controller` remains the sole direct owner of `/dev/ttyACM*`. Manage polling
+with:
+
+```sh
+batocera-services restart R4GameCard
+/userdata/system/services/R4GameCard status
+```
 
 ## LED states
 
@@ -383,10 +570,10 @@ Poll the next queued service-button event:
 
 It returns `EVENT NONE` or a single
 `EVENT BUTTON=CAPTURE ACTION=SHORT TIME_MS=1450 SEQ=3` line. The service
-recognizes Capture, R4 and Trophy events. Screenshot capture, rolling video,
-achievement browser, R4 system panel and long/double R4 actions are explicit
-action stubs in this repository; the service logs them and does not claim those
-host features are implemented.
+recognizes Capture, R4 and Trophy events. Capture SHORT and LONG are implemented
+as screenshot and previous-game replay respectively. The achievement browser,
+future R4 system panel, and standalone long/double R4 host actions remain
+explicit stubs; the service logs them without claiming those features.
 
 Set a persistent LED color:
 
@@ -602,9 +789,23 @@ sh integration/batocera/tests/run-tests.sh
 
 This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
 
+| Item | Current evidence |
+|---|---|
+| RP2040 firmware `0.9.0-dev`, HID/CDC and watchdog | Hardware-verified before this change |
+| Capture SHORT to a real `/userdata/screenshots` file | Hardware-verified before this change |
+| Batocera 40 FFmpeg/KMS/Pulse/segment capabilities | Checked on the Orange Pi |
+| H.264/AAC segmented smoke clip and `ffprobe` validation | Checked on the Orange Pi outside gameplay |
+| RO bind view beside RW views | Checked on Batocera with a temporary filesystem |
+| Firmware `0.10.0` UF2 | Built, not flashed |
+| 30-second replay FPS/CPU/quality in PS1 | Not yet hardware-verified |
+| Dreamcast replay | Disabled and not hardware-verified |
+| Physical Game Card reader/card and safe eject | Not yet hardware-verified |
+| Physical Capture input through MCP23017 | Not yet hardware-verified |
+| Physical OLED | Not yet hardware-verified |
+
 1. Install the integration and confirm `R4Controller status` becomes `online`.
 2. Check `PING`, `VERSION`, `INPUT`, `STATUS` and the configured
-   `0.8.0` version.
+   `0.10.0` version.
 3. Unplug/replug and reset the RP2040; confirm rediscovery, one service instance,
    restored LED state and no repetitive log flood.
 4. Remap the changed descriptor; verify all old controls and
@@ -614,10 +815,47 @@ This must be completed on the Orange Pi 3 LTS; it is not replaced by host mocks.
 6. Start/stop a game and confirm LED state plus `HOST GAME` acknowledgements.
 7. Trigger a real RetroAchievement and confirm the existing gold flash/log plus
    the OLED-state message.
-8. Inject every service button/action and confirm one bounded log action per
-   event; do not expect the documented stubs to perform screenshots or panels.
-9. Inspect malformed/unknown CDC commands and a line over 255 bytes; confirm a
+8. Inject `CAPTURE SHORT`; confirm exactly one new screenshot, typed `SAVED`
+   feedback and base-color restoration.
+9. Run a supported game for more than 30 seconds, inject `CAPTURE LONG`, and
+   confirm exactly one preceding-game MP4 with H.264 video and AAC audio.
+   Measure gameplay FPS, CPU load, FFmpeg warnings/dropped frames and playback
+   quality. Repeat on PS1. Dreamcast must remain `UNAVAILABLE` until a separate
+   performance run justifies enabling it.
+10. With a correctly labeled/UUID Game Card, run `init` twice and verify one
+   primary mount, a read-only ROM view, writable screenshot/video views and
+   shared free space. Verify each BUSY owner blocks eject, overlapping owners
+   coexist, `sync` precedes view/private unmounts, safe eject latches `EJECTED`,
+   and reinsertion returns to `READY`.
+11. Inspect malformed/unknown CDC commands and a line over 255 bytes; confirm a
    bounded `ERR` response and continued reconnect/service operation.
+
+For the PS1 and later Dreamcast performance run, enable RetroArch's on-screen
+FPS display, establish a no-recording baseline in the same scene, then start a
+fresh session with replay enabled. From SSH, collect the encoder load and log:
+
+```sh
+while pidof ffmpeg >/dev/null 2>&1; do
+    date
+    top -b -n 1 | grep -E 'ffmpeg|retroarch|pcsx|flycast'
+    sleep 2
+done > /userdata/system/r4/r4-replay-performance.log
+
+grep -Ei 'drop|duplicate|queue|non-monoton|error|failed' \
+    /userdata/system/r4/r4-replay.log
+
+clip="$(find /userdata/recordings /userdata/recordings/r4-card \
+    -type f -name '*.mp4' 2>/dev/null | sort | tail -n 1)"
+ffprobe -v error \
+    -show_entries format=duration \
+    -show_entries stream=index,codec_name,codec_type,avg_frame_rate \
+    -of default=noprint_wrappers=1 "$clip"
+```
+
+Compare baseline and replay FPS for at least five minutes, trigger LONG twice
+at separate moments, play both clips on a normal PC, and listen for continuous
+game audio. Keep Dreamcast in `R4_REPLAY_DISABLED_SYSTEMS` unless this test
+passes without turning gameplay into a slideshow.
 
 ## Supported firmware
 
@@ -649,6 +887,9 @@ The integration creates temporary state files:
 /tmp/r4-controller-service.pid
 /tmp/r4-controller-service.state
 /tmp/r4-controller-led-mode
+/tmp/r4-game-card/
+/tmp/r4-replay-state/
+/tmp/r4-replay/
 ```
 
 Persistent logs are stored in:
@@ -657,6 +898,8 @@ Persistent logs are stored in:
 /userdata/system/r4/r4-controller.log
 /userdata/system/r4/r4-game-events.log
 /userdata/system/r4/r4-achievements.log
+/userdata/system/r4/r4-game-card.log
+/userdata/system/r4/r4-replay.log
 ```
 
 Runtime files and logs are not part of the repository.
@@ -667,11 +910,16 @@ The current prototype does not yet include:
 
 - a physical ADC source or calibrated hardware for analog LT and RT;
 - Home;
-- Capture;
+- a physical Capture input through the planned GPIO expander;
 - Trophy;
 - vibration;
 - a selected OLED model, resolution or physical display driver;
 - battery and power telemetry.
+
+Replay support is implemented in software, but its gameplay FPS/CPU impact,
+PS1 quality, Dreamcast viability and long-duration stability are not yet
+hardware-verified. The physical Game Card reader/card and its real-media bind
+mount/eject behavior are also still unverified.
 
 All four external RP2040 ADC channels are already occupied by the two analog sticks.
 
@@ -681,6 +929,7 @@ Additional digital controls should use a GPIO expander, button matrix or another
 
 The remaining hardware work is concrete: select and electrically validate an
 external ADC, record independent LT/RT calibration values, select and verify a
-GPIO expander for Home/Capture/Trophy, assign/debounce those real button inputs, select
+GPIO expander for Home/Capture/Trophy, assign/debounce those real button inputs,
+validate the full-size SD reader and card-removal behavior, select
 the OLED model and bus/address, implement its framebuffer backend, and validate
 battery/power/temperature sensors on the final power design.

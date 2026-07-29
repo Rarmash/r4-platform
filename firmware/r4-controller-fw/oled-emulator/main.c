@@ -33,7 +33,7 @@ static void setup_waiting(r4_display_model_t *model) {
 
 static void setup_home(r4_display_model_t *model) {
     model->screen = R4_DISPLAY_HOME;
-    strcpy(model->firmware_version, "0.8.0");
+    strcpy(model->firmware_version, "0.10.0");
     strcpy(model->time, "12:34");
     model->battery_available = true;
     model->battery_percent = 78;
@@ -78,7 +78,7 @@ static void setup_error(r4_display_model_t *model) {
 static const scenario_t scenarios[] = {
     {"boot", setup_boot, UINT32_C(0xC8B14A84)},
     {"waiting", setup_waiting, UINT32_C(0x717C7A4F)},
-    {"home", setup_home, UINT32_C(0xA00E630B)},
+    {"home", setup_home, UINT32_C(0xAF2D1387)},
     {"game", setup_game, UINT32_C(0x05667CE6)},
     {"achievement", setup_achievement, UINT32_C(0xFB917295)},
     {"diagnostic", setup_diagnostic, UINT32_C(0x55B0FB19)},

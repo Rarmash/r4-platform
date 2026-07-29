@@ -175,6 +175,64 @@ r4_parse_status_t r4_protocol_parse(
         if (!copy_payload(command, text + 17)) {
             return R4_PARSE_TOO_LONG;
         }
+    } else if (strncmp(text, "HOST CAPTURE ", 13) == 0) {
+        command->type = R4_COMMAND_HOST_CAPTURE;
+        if (
+            strcmp(text, "HOST CAPTURE STATUS=BUSY") != 0 &&
+            strcmp(text, "HOST CAPTURE STATUS=SAVED") != 0 &&
+            strcmp(text, "HOST CAPTURE STATUS=ERROR") != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=SCREENSHOT STATUS=BUSY"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=SCREENSHOT STATUS=SAVED"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=SCREENSHOT STATUS=ERROR"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=CLIP STATUS=BUFFERING"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=CLIP STATUS=SAVING"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=CLIP STATUS=SAVED"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=CLIP STATUS=ERROR"
+            ) != 0 &&
+            strcmp(
+                text,
+                "HOST CAPTURE TYPE=CLIP STATUS=UNAVAILABLE"
+            ) != 0
+        ) {
+            return R4_PARSE_INVALID_VALUE;
+        }
+        if (!copy_payload(command, text + 13)) {
+            return R4_PARSE_TOO_LONG;
+        }
+    } else if (strncmp(text, "HOST CARD ", 10) == 0) {
+        command->type = R4_COMMAND_HOST_CARD;
+        if (
+            strcmp(text, "HOST CARD STATE=INSERTED") != 0 &&
+            strcmp(text, "HOST CARD STATE=READY") != 0 &&
+            strcmp(text, "HOST CARD STATE=BUSY") != 0 &&
+            strcmp(text, "HOST CARD STATE=EJECTED") != 0 &&
+            strcmp(text, "HOST CARD STATE=ERROR") != 0
+        ) {
+            return R4_PARSE_INVALID_VALUE;
+        }
+        if (!copy_payload(command, text + 10)) {
+            return R4_PARSE_TOO_LONG;
+        }
     } else if (strncmp(text, "HOST TELEMETRY ", 15) == 0) {
         command->type = R4_COMMAND_HOST_TELEMETRY;
         if (!copy_payload(command, text + 15)) {

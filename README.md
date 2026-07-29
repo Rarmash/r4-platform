@@ -8,10 +8,14 @@ The current primary hardware target is a custom Batocera-based handheld console 
 
 The handheld prototype currently has a working composite USB HID and CDC controller with two analog sticks, D-pad, ABXY, L1/R1, left and right stick switches (commonly called L3/R3), Start, Select and the R4 system button, which Batocera/RetroArch uses as its Hotkey. Automatic stick calibration, RGB status indication, reconnect handling, game lifecycle hooks and physical RetroAchievements feedback are implemented.
 
-Firmware `0.8.0` adds a tested software foundation for analog LT/RT,
-service-button gestures and a future OLED. The external ADC, GPIO expander and
-OLED have not been selected or validated, so these are not claimed as physical
-hardware support.
+Firmware `0.10.0` adds distinct screenshot/replay OLED feedback and a
+non-intrusive replay-ready indicator. The Batocera side keeps a bounded
+30-second segmented replay buffer while a supported game is running:
+Capture SHORT makes one screenshot and Capture LONG finalizes the preceding
+clip. R4 Game Card now uses one filesystem with a read-only ROM view and
+writable screenshot/video views. Capture SHORT is hardware-verified through
+the service test path; replay performance, the physical Capture input, SD
+reader/card, external ADC and physical OLED are not yet hardware-verified.
 
 The Batocera integration can be installed and updated automatically. The complete controller layout, gameplay path and RetroAchievements indication have been verified on hardware.
 
@@ -35,6 +39,8 @@ RP2040 embedded controller
                          ├── EmulationStation
                          ├── emulators
                          ├── RetroAchievements
+                  ├── replay/capture manager
+                  ├── R4 Game Card logical views
                          └── R4 Batocera integration
 ```
 
@@ -85,7 +91,7 @@ Build and check all JVM modules:
 ./gradlew clean check
 ```
 
-On Windows, use `./gradlew.bat clean check`.
+On Windows, use `.\gradlew.bat clean check`.
 
 Run the Hub:
 
@@ -112,7 +118,10 @@ See the [Linux Agent README](agent-linux/README.md) for updates, status, removal
 
 ## Controller firmware
 
-The RP2040 firmware exposes the physical controls as a USB HID gamepad and provides a CDC service interface for diagnostics, version reporting, host state and LED control. It also performs stick-center calibration and drives the WS2812 status LED.
+The RP2040 firmware exposes the physical controls as a USB HID gamepad and
+provides a CDC service interface for diagnostics, version reporting, host
+state, Capture/Game Card feedback and LED control. It also performs
+stick-center calibration and drives the WS2812 status LED.
 
 The Windows OLED emulator can connect directly to the controller over USB CDC and display the framebuffer rendered by RP2040 firmware.
 
@@ -120,7 +129,11 @@ See the [controller firmware README](firmware/r4-controller-fw/README.md) for pi
 
 ## Batocera integration
 
-The Batocera integration discovers and monitors the controller, validates its firmware version, recovers from USB reconnects, maintains persistent LED states and connects game and RetroAchievements events to temporary LED effects.
+The Batocera integration discovers and monitors the controller, validates its
+firmware version, recovers from USB reconnects, handles screenshot and previous
+gameplay capture, publishes safe ROM/capture views from one removable Game Card
+filesystem, maintains persistent LED states and connects game and
+RetroAchievements events to temporary LED effects.
 
 See the [Batocera integration README](integration/batocera/README.md) for installation, controller configuration, service operation and diagnostics.
 
@@ -142,8 +155,9 @@ The planned final controller includes:
 
 The current prototype already implements the D-pad, ABXY, both analog sticks,
 both physical stick switches (L3/R3), L1/R1, Start, Select and R4. Software
-contracts now exist for analog L2/R2 and Capture/Trophy; their physical input
-hardware remains a future milestone alongside Home.
+contracts now exist for analog L2/R2 and Capture/Trophy; the host-side Capture
+screenshot path is implemented, while their physical input hardware remains a
+future milestone alongside Home.
 
 All four external RP2040 ADC channels are occupied by the two analog sticks, so analog L2 and R2 require an external ADC or another analog input solution. Additional digital controls require a GPIO expander, button matrix or another bus-based input solution.
 
